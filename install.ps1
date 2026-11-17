@@ -162,7 +162,7 @@ if ($OnWindows) {
 }
 
 # 5. Förutsättningar: PowerShell 7 och modulerna (bara varningar – Puppa är installerat ändå)
-$pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+$pwsh = Get-Command pwsh, pwsh-preview -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($pwsh) {
     $mods = 'PnP.PowerShell', 'ExchangeOnlineManagement', 'MicrosoftTeams', 'Microsoft.Graph.Authentication',
             'Microsoft.PowerShell.SecretManagement', 'Microsoft.PowerShell.SecretStore', 'ImportExcel'

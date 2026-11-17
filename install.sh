@@ -91,11 +91,12 @@ case ":$PATH:" in
 esac
 
 # 6. Förutsättningar: PowerShell 7 och modulerna (bara varningar – Puppa är installerat ändå)
-if command -v pwsh >/dev/null 2>&1; then
-  MISSING="$(pwsh -NoLogo -NoProfile -NonInteractive -Command '@("PnP.PowerShell","ExchangeOnlineManagement","MicrosoftTeams","Microsoft.Graph.Authentication","Microsoft.PowerShell.SecretManagement","Microsoft.PowerShell.SecretStore","ImportExcel") | Where-Object { -not (Get-Module -ListAvailable -Name $_) }' 2>/dev/null | tr '\n' ' ' || true)"
+PWSH="$(command -v pwsh || command -v pwsh-preview || true)"
+if [ -n "$PWSH" ]; then
+  MISSING="$("$PWSH" -NoLogo -NoProfile -NonInteractive -Command '@("PnP.PowerShell","ExchangeOnlineManagement","MicrosoftTeams","Microsoft.Graph.Authentication","Microsoft.PowerShell.SecretManagement","Microsoft.PowerShell.SecretStore","ImportExcel") | Where-Object { -not (Get-Module -ListAvailable -Name $_) }' 2>/dev/null | tr '\n' ' ' || true)"
   if [ -n "$(printf '%s' "$MISSING" | tr -d ' ')" ]; then
     warn "Moduler som saknas: $MISSING"
-    warn "Installera: pwsh -c 'Install-PSResource $(printf '%s' "$MISSING" | sed 's/ *$//; s/ /,/g') -Scope CurrentUser -TrustRepository'   (eller: uppa install m365)"
+    warn "Installera: $(basename "$PWSH") -c 'Install-PSResource $(printf '%s' "$MISSING" | sed 's/ *$//; s/ /,/g') -Scope CurrentUser -TrustRepository'   (eller: uppa install m365)"
   fi
 else
   case "$(uname -s)" in

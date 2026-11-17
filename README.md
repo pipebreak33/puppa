@@ -44,10 +44,14 @@ MicrosoftTeams, Microsoft.Graph, ImportExcel, Microsoft.PowerShell.SecretManagem
   licens räcker en del av namnet – `johan` ger en lista att välja ur, en enda träff väljs direkt.
 - **SharePoint = PnP.** Bara SharePoint-recepten går via PnP PowerShell, som kräver en egen Entra ID-app per tenant.
   Första gången frågar Puppa om en **ny PnP-appregistrering** (`Register-PnPEntraIDAppForInteractiveLogin` /
-  `Register-PnPEntraIDApp`) eller ett befintligt ClientId. Inget skapas i tenanten utan att du svarar **j**.
+  `Register-PnPEntraIDApp`), eller så **söker den fram en befintlig PnP-app** i tenanten via Graph
+  (PnP i namnet, eller publik klient med SharePoint-rättigheter) – eller så klistrar du in ClientId. Inget skapas i tenanten utan att du svarar **j**.
 - **Du ser alltid kommandot** som körs. Recept märkta **ändrar** kräver ett **j**, och Puppa loggar in först så att
   du ser vilken tenant ändringen hamnar i. **läs**-recept körs direkt.
 - **Exportera** förra resultatet till Excel (ImportExcel) eller CSV (semikolon, UTF-8) i `~/Documents/Puppa/`.
+- **Ingen nyckelringsfråga.** På macOS sparar Puppa som standard inte inloggningarna i nyckelringen (Graph
+  `-ContextScope Process`, PnP utan `-PersistLogin`), så en osignerad Homebrew-`pwsh` inte frågar varje gång.
+  Du loggar in en gång per körning. Slå på **Kom ihåg inloggningar** under *Logga in…* om du vill spara dem.
 - **Logga ut…** från allt (förvalt) eller en tjänst i taget. Rensar även sparade inloggningar
   (PnP `-ClearPersistedLogin`, Graph-token). Puppa frågar också när du avslutar.
 
@@ -66,16 +70,20 @@ MicrosoftTeams, Microsoft.Graph, ImportExcel, Microsoft.PowerShell.SecretManagem
 | `-n` / `--torr` | visa kommandona, kör ingenting |
 | `--no-anim` | inga animationer (stängs också av av `NO_COLOR` och när utdata pipas) |
 
-## Recept (63 st)
+## Recept (78 st)
 
 SharePoint (sajter, största sajter, sajtinfo, behörigheter, användare, listor, papperskorg/återställ,
-extern delning, webbplatsadmins, SharePoint-grupper, raderade sajter, tenantinställningar) ·
+extern delning, webbplatsadmins, SharePoint-grupper, raderade sajter, tenantinställningar, **vad har flyttats** –
+vem (UPN), när, från/till som länkar + förslag på var du ska leta; **vem har tagit bort saker** – med Excel-rapport) ·
 OneDrive (hitta, största, ge åtkomst) · Exchange (postlådor, delade postlådor: skapa, ge/ta bort åtkomst,
 vem har åtkomst, vad kommer en användare åt; konvertera till delad, vidarebefordringar, autosvar,
 kalenderbehörighet, rum, distributionslistor, meddelandespårning) · Grupper (lista, medlemmar,
 användarens grupper, lägg till/ta bort, utan ägare) · Användare (info, licenser, vem har licens,
 inaktiva, gäster, bjud in gäst, spärra inloggning, MFA-metoder, adminroller) · Teams (team, medlemmar,
-lägg till, kanaler, team med en ägare) · Excel/CSV-export · Lokalt (modulversioner, aktuell session).
+lägg till, kanaler, team med en ägare) · **Entra ID** (om tenanten, inloggningar per användare, misslyckade
+inloggningar, vem ändrade vad, villkorlig åtkomst, enheter, en användares enheter, företagsappar och samtycken,
+raderade användare/grupper, adminroller, appregistreringar, **hitta PnP-appen**, hemligheter/certifikat som går ut) ·
+Excel/CSV-export · Lokalt (modulversioner, aktuell session).
 
 ### Eget recept
 
@@ -97,7 +105,7 @@ Get-TeamUser -GroupId $t.GroupId | Where-Object { $_.Role -eq $Roll } | Select-O
 ```
 
 Uppslag: `@user` `@group` `@sku` (Graph) · `@mailbox` `@recipient` `@dl` (Exchange) · `@site` `@spuser` (PnP) ·
-`@team` (Teams). Lägg till `+` för flera värden (`@user+` blir `a@x.se,b@x.se`).
+`@team` (Teams) · `@app` (appregistreringar, värdet blir ClientId). Lägg till `+` för flera värden (`@user+` blir `a@x.se,b@x.se`).
 Parametrarna blir variabler (`$Team`). I standardvärden och skript fungerar `{tenant}` `{prefix}`
 `{adminUrl}` `{rootUrl}` `{upn}` `{kund}` `{datum}`. Returnera objekt så går resultatet att exportera.
 

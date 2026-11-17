@@ -40,7 +40,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 HOME = Path.home()
 DIR = Path(os.environ.get("PUPPA_DIR") or HOME / ".puppa")
 os.environ["PUPPA_DIR"] = str(DIR)
@@ -89,7 +89,8 @@ if IS_WIN:
 
 
 def pwsh_exe():
-    return shutil.which("pwsh") or "pwsh"
+    """PowerShell 7: pwsh, annars förhandsversionen (Homebrew-casken powershell@preview heter pwsh-preview)."""
+    return shutil.which("pwsh") or shutil.which("pwsh-preview") or "pwsh"
 
 
 def ps_args(script, *flags):
@@ -1297,14 +1298,21 @@ WHO_PS = {
 }
 
 
+def keep_logins():
+    """Spara inloggningar mellan körningar (tokens i nyckelringen / MSAL-cachen)?
+    Av som standard på macOS: en osignerad pwsh (Homebrew) får annars en nyckelringsfråga vid varje inloggning."""
+    v = config().get("keep_logins")
+    return (not IS_MAC) if v is None else bool(v)
+
+
 def pnp_connect_code(t, url):
     base = f"Connect-PnPOnline -Url {psq(url)} -ClientId {psq(t['client_id'])} -Tenant {psq(t['tenant'])}"
     a = t.get("auth", "interactive")
     if a == "certificate":
         return base + f" -CertificatePath {psq(t['cert_path'])} -CertificatePassword {SECRET_EXPR} -ErrorAction Stop"
     if a == "device":
-        return base + " -DeviceLogin -PersistLogin -ErrorAction Stop"
-    return base + " -Interactive -PersistLogin -ErrorAction Stop"
+        return base + " -DeviceLogin" + (" -PersistLogin" if keep_logins() else "") + " -ErrorAction Stop"
+    return base + " -Interactive" + (" -PersistLogin" if keep_logins() else "") + " -ErrorAction Stop"
 
 
 def connect_code(kind, t, url=None, scopes=None):
@@ -1326,7 +1334,7 @@ def connect_code(kind, t, url=None, scopes=None):
     if kind == "graph":
         sc = ",".join(psq(x) for x in sorted(set(scopes or []) | {"User.Read"}))
         return "Connect-MgGraph" + (f" -TenantId {psq(tid)}" if tid else "") + f" -Scopes {sc} -NoWelcome" + \
-               (" -UseDeviceCode" if dev else "") + " -ErrorAction Stop"
+               ("" if keep_logins() else " -ContextScope Process") + (" -UseDeviceCode" if dev else "") + " -ErrorAction Stop"
     raise ValueError(kind)
 
 
@@ -1416,6 +1424,12 @@ def conn_status():
 # I ett recept: param: Anvandare | Användare | | @user      (@typ+ = flera värden, kommaseparerade)
 # Varje uppslag skriver "PUPPA-PICK|värde|namn|detalj" per träff. $Q är det du skrev.
 PICK = "PUPPA-PICK|"
+PNP_APPS_PS = r"""
+$sp = '00000003-0000-0ff1-ce00-000000000000'
+$pnp = Get-MgApplication -All -Property 'id,appId,displayName,createdDateTime,requiredResourceAccess,publicClient' |
+    Where-Object { $_.DisplayName -match 'PnP' -or (($_.RequiredResourceAccess.ResourceAppId -contains $sp) -and
+                   (@($_.PublicClient.RedirectUris) -match 'localhost')) } | Sort-Object CreatedDateTime -Descending
+"""
 LOOKUPS = {
     "user": ("graph:User.Read.All", "användare", r"""
 $s = $Q -replace '"', ''
@@ -1462,8 +1476,18 @@ Get-PnPEntraIDUser @p | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{1}|{0}' -f
     "team": ("teams", "team", r"""
 Get-Team | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{0}|{1}' -f $_.DisplayName, "$($_.Visibility)$(if ($_.Archived) { ' · arkiverat' })") }
 """),
+    "app": ("graph:Application.Read.All", "appregistreringar", r"""
+$s = $Q -replace '"', ''
+$p = @{ Top = 40; Property = 'id,appId,displayName,createdDateTime'; ConsistencyLevel = 'eventual' }
+if ($s) { $p.Search = ('"displayName:{0}"' -f $s) }
+Get-MgApplication @p | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{1}|{0} · skapad {2:yyyy-MM-dd}' -f $_.AppId, $_.DisplayName, $_.CreatedDateTime) }
+"""),
+    # PnP-appar: namnet innehåller PnP, eller en publik klient (http://localhost) med SharePoint-rättigheter
+    "pnpapp": ("graph:Application.Read.All", "PnP-appar", PNP_APPS_PS + r"""
+$pnp | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{1}|{0} · skapad {2:yyyy-MM-dd}' -f $_.AppId, $_.DisplayName, $_.CreatedDateTime) }
+"""),
 }
-LIST_ALL = {"site", "team", "sku"}          # hämtas en gång per session och filtreras här i Puppa
+LIST_ALL = {"site", "team", "sku", "pnpapp"}          # hämtas en gång per session och filtreras här i Puppa
 LOOKUP_CACHE = {}
 
 
@@ -1520,6 +1544,8 @@ def lookup_param(prm, t, default):
             break
         if "@" in q and " " not in q and kind not in ("site", "team", "sku"):
             v = q                                            # fullständig adress: använd direkt
+        elif kind == "site" and re.match(r"https?://", q):
+            v = q                                            # inklistrad länk (sajt, bibliotek eller mapp)
         else:
             t, hits = run_lookup(kind, t, q)
             if hits is None:
@@ -1640,7 +1666,7 @@ def load_recipes():
                     rs[r.id] = r
                 except Exception as e:
                     out(red(f"  Kunde inte läsa {f.name}: {e}"))
-    order = ["SharePoint", "OneDrive", "Exchange", "Grupper", "Användare", "Teams", "Excel", "Lokalt"]
+    order = ["SharePoint", "OneDrive", "Exchange", "Grupper", "Användare", "Teams", "Entra ID", "Excel", "Lokalt"]
     return sorted(rs.values(), key=lambda r: (order.index(r.category) if r.category in order else 50,
                                               r.category, r.writes, r.name))
 
@@ -1789,7 +1815,7 @@ def new_recipe():
     try:
         name = ask_text("Vad ska receptet heta?", required=True)
         cat = choose([dict(label=x, value=x) for x in ["SharePoint", "OneDrive", "Exchange", "Grupper", "Användare",
-                                                      "Teams", "Excel", "Lokalt"]],
+                                                      "Teams", "Entra ID", "Excel", "Lokalt"]],
                      title="Kategori")
         if cat is None:
             raise Cancel()
@@ -1894,10 +1920,43 @@ def pnp_ready(t):
         return None
     where = f"i {t['name']}" if t else "i tenanten"
     say(f"SharePoint-recept går via PnP PowerShell, som behöver en egen app-registrering {where}. "
-        "Den gör vi en gång per tenant.", "worry")
-    if not confirm("Gör en ny PnP-appregistrering nu?", True):
+        "Finns det redan en kan jag söka fram den.", "worry")
+    how = choose([dict(label="Sök fram befintlig PnP-app", hint="letar bland appregistreringarna via Graph", value="find"),
+                  dict(label="Klistra in ClientId", hint="om du vet vilken app det är", value="paste"),
+                  dict(label="Ny PnP-appregistrering…", hint="Register-PnPEntraID… (frågar först)", value="new"),
+                  dict(label="Avbryt", value=None, key="q")],
+                 title="PnP-app " + where)
+    if how is None:
         return None
-    return pnp_setup(t, intro=False)
+    if how == "new":
+        return pnp_setup(t, intro=False)
+    try:
+        cid = None
+        if how == "find":
+            t2, cid = find_pnp_app(t)
+            t = t2 or t
+            if not cid:
+                out(dim("  Du kan klistra in ClientId i stället (esc avbryter)."))
+        if not cid:
+            cid = ask_text("ClientId (Application ID, en GUID)", required=True,
+                           check=lambda v: None if GUID.match(v) else "Det ser inte ut som en GUID.")
+        if not t:
+            say("Jag vet inte vilken tenant appen hör till – logga in först (Logga in… → Microsoft Graph).", "worry")
+            return None
+        t = dict(t, client_id=cid)
+        t.setdefault("auth", "interactive")
+        if not t.get("admin_url"):
+            dom, pre = tenant_info(t.get("tenant", ""))
+            if not pre:
+                pre = ask_text("SharePoint-namnet? (det som står före .sharepoint.com)", required=True, check=check_tenant)
+            t.update(sp_fields(pre.lower().replace(".sharepoint.com", "").replace("-admin", "").replace("https://", "")))
+    except Cancel:
+        out(dim("  Avbrutet. Inget sparat."))
+        return None
+    save_tenants([x for x in tenants() if x["name"] != t["name"]] + [t])
+    use_tenant(t, quiet=True)
+    out("  " + green("✔") + f" PnP-appen sparad för {t['name']} · ClientId {cid} · {AUTHS.get(t['auth'], '')}")
+    return t
 
 
 def register_code(app, tenant, auth, perm, outdir):
@@ -1954,13 +2013,13 @@ def pnp_setup(t=None, intro=True):
             raise Cancel()
         t["auth"] = auth
         how = choose([dict(label="Registrera en ny app åt mig", hint="Register-PnPEntraID… (frågar först)", value="new"),
-                      dict(label="Det finns redan en app", hint="jag klistrar in ClientId", value="have")],
+                      dict(label="Det finns redan en app", hint="sök fram den eller klistra in ClientId", value="have")],
                      title=f"PnP-app i {t['name']}")
         if how is None:
             raise Cancel()
         if how == "have":
-            t["client_id"] = ask_text("ClientId (Application ID, en GUID)", required=True,
-                                      check=lambda v: None if GUID.match(v) else "Det ser inte ut som en GUID.")
+            t2, cid = ask_client_id(t)
+            t = dict(t2, **{k: t[k] for k in ("admin_url", "auth", "prefix", "root_url") if k in t}, client_id=cid)
             if auth == "certificate" and not import_cert(t):
                 raise Cancel()
         elif not register_app(t):
@@ -1977,6 +2036,45 @@ def pnp_setup(t=None, intro=True):
     if confirm("Testa anslutningen nu?", True):
         test_pnp(t)
     return t
+
+
+def find_pnp_app(t):
+    """Sök i tenanten (Graph) efter appar som ser ut som PnP-appar och låt användaren välja. -> (t, ClientId|None)"""
+    LOOKUP_CACHE.pop(("pnpapp", (t or {}).get("name")), None)
+    t2, hits = run_lookup("pnpapp", t, "")
+    t = t2 or t or {}
+    if hits is None:
+        say("Kunde inte söka bland appregistreringarna (kräver Application.Read.All i Graph).", "sad")
+        return t, None
+    if not hits:
+        say(f"Hittade ingen PnP-app i {t.get('name', 'tenanten')} – varken på namn eller som publik klient med SharePoint-rättigheter.",
+            "worry")
+        return t, None
+    rows = [dict(label=h[1], hint=h[2], value=h[0]) for h in hits]
+    rows += [("head", ""), dict(label="Ingen av dem", value="__none", key="q")]
+    v = choose(rows, title=f"{len(hits)} möjliga PnP-appar i {t.get('name', 'tenanten')}")
+    if v in (None, "__none"):
+        return t, None
+    return t, v
+
+
+def ask_client_id(t, default=""):
+    """Sök fram PnP-appen i tenanten eller klistra in ClientId. -> (t, ClientId). Cancel om man avbryter."""
+    how = choose([dict(label="Sök fram den i tenanten", hint="letar bland appregistreringarna via Graph", value="find"),
+                  dict(label="Klistra in ClientId", hint="Application ID, en GUID", value="paste")],
+                 title="Var finns PnP-appen?")
+    if how is None:
+        raise Cancel()
+    if how == "find":
+        t2, cid = find_pnp_app(t)
+        t = dict(t2, client_id=t.get("client_id", "")) if t2 else t
+        if cid:
+            out("    " + green("→ ") + f"ClientId {cid}")
+            return t, cid
+        out(dim("  Då klistrar vi in den i stället."))
+    cid = ask_text("ClientId (Application ID, en GUID)", default, required=True,
+                   check=lambda v: None if GUID.match(v) else "Det ser inte ut som en GUID.")
+    return t, cid
 
 
 def import_cert(t):
@@ -2133,9 +2231,8 @@ def delete_tenant(t):
 
 def set_client_id(t):
     try:
-        cid = ask_text("ClientId (Application ID)", t.get("client_id", ""), required=True,
-                       check=lambda v: None if GUID.match(v) else "Det ser inte ut som en GUID.")
-        t = dict(t, client_id=cid)
+        t2, cid = ask_client_id(t, t.get("client_id", ""))
+        t = dict(t2 or t, client_id=cid)
         if not t.get("admin_url"):
             pre = ask_text("SharePoint-namnet? (det som står före .sharepoint.com)", t.get("prefix", ""), required=True)
             t.update(sp_fields(pre.lower()))
@@ -2213,7 +2310,7 @@ def tenants_menu():
                      dict(label="Byt ClientId…", value="cid")]
         else:
             acts += [dict(label="Ny PnP-appregistrering…", hint="behövs för SharePoint-recept", value="pnp"),
-                     dict(label="Ange befintligt ClientId…", value="cid")]
+                     dict(label="Hitta befintlig PnP-app…", hint="sök i tenanten eller ange ClientId", value="cid")]
         acts += [dict(label="Ta bort ur listan…", value="del"), dict(label="Tillbaka", value=None, key="q")]
         act = choose(acts, title=t["name"])
         if act == "use":
@@ -2295,9 +2392,22 @@ def connect_menu():
                  dict(label="SharePoint-sajt (PnP)…", hint="valfri sajt-URL", value="pnp-site")]
     else:
         rows.append(dict(label="SharePoint (PnP)…", hint="kräver en PnP-appregistrering i tenanten", value="pnp-admin"))
+    keep = keep_logins()
     rows += [dict(label="Logga ut…", hint="allt eller en tjänst i taget", value="off"),
+             dict(label="Kom ihåg inloggningar: " + ("på" if keep else "av"),
+                  hint=("sparas i nyckelringen mellan körningar" if keep else "bara medan Puppa är igång – ingen nyckelringsfråga"),
+                  value="keep"),
              dict(label="Tillbaka", value=None, key="q")]
     v = choose(rows, title=f"Logga in · {who}", status=conn_status, screen=True)
+    if v == "keep":
+        set_config(keep_logins=not keep)
+        if not keep:
+            say("Inloggningar sparas nu mellan körningar (Graph och PnP lägger tokens i nyckelringen). "
+                "Får du en nyckelringsfråga varje gång: välj 'Tillåt alltid', eller installera en signerad pwsh "
+                "(brew install --cask powershell).", "happy")
+        else:
+            say("Inloggningar sparas inte längre – du loggar in en gång per Puppa-session och slipper nyckelringen.", "happy")
+        return
     try:
         if v == "pnp-admin":
             ensure("pnp", t)
@@ -2318,7 +2428,8 @@ def connect_menu():
 CAT_HINTS = {"SharePoint": "sajter, behörigheter, papperskorg, delning", "OneDrive": "hitta, ge åtkomst, största",
              "Exchange": "delade postlådor, åtkomst, kalender, listor, spårning",
              "Grupper": "medlemmar, lägg till/ta bort, utan ägare", "Användare": "info, licenser, gäster, MFA, spärra",
-             "Teams": "team, medlemmar, kanaler", "Excel": "exportera senaste resultatet", "Lokalt": "moduler, session"}
+             "Teams": "team, medlemmar, kanaler", "Entra ID": "inloggningar, granskning, villkorlig åtkomst, enheter, appar, roller",
+             "Excel": "exportera senaste resultatet", "Lokalt": "moduler, session"}
 
 
 def remember_recipe(rid):
@@ -2535,9 +2646,10 @@ def main(argv=None):
     sub.add_parser("hej")
     a = ap.parse_args(rest)
 
-    if not shutil.which("pwsh"):
+    if not (shutil.which("pwsh") or shutil.which("pwsh-preview")):
         say("Jag hittar inte pwsh (PowerShell 7). Installera det: Windows: winget install Microsoft.PowerShell · "
-            "macOS: brew install powershell · eller: uppa install powershell", "sad")
+            "macOS: signerat .pkg från github.com/PowerShell/PowerShell/releases (Homebrew-formeln är osignerad "
+            "och ger nyckelringsfrågor) · eller: uppa install powershell", "sad")
         return 1
 
     def pick(name):

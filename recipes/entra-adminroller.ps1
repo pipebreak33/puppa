@@ -1,6 +1,6 @@
 <#PUPPA
 namn:        Vem har adminroller?
-kategori:    Användare
+kategori:    Entra ID
 typ:         läs
 kräver:      graph:RoleManagement.Read.Directory,User.Read.All
 beskrivning: Alla aktiva katalogroller och deras medlemmar (Global admin m.fl.).
