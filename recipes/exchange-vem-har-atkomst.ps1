@@ -4,7 +4,7 @@ kategori:    Exchange
 typ:         läs
 kräver:      exo
 beskrivning: Fullbehörighet, Skicka som och Skicka för på en postlåda.
-param:       Postlada | Postlådan (adress) |
+param:       Postlada | Postlådan (adress) | | @mailbox
 #>
 Get-EXOMailboxPermission -Identity $Postlada | Where-Object { $_.User -notlike 'NT AUTHORITY*' -and -not $_.IsInherited } |
     ForEach-Object { [pscustomobject]@{ Vem = $_.User; Åtkomst = ($_.AccessRights -join ', ') } }

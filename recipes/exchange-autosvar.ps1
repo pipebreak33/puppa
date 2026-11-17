@@ -4,7 +4,7 @@ kategori:    Exchange
 typ:         ändrar
 kräver:      exo
 beskrivning: Slår på (eller av) automatiskt svar för en postlåda, samma text internt och externt.
-param:       Postlada | Postlådan (adress) |
+param:       Postlada | Postlådan (adress) | | @mailbox
 param:       Lage | Läge | På | På,Av
 param:       Text? | Svarstext (krävs för På) |
 #>

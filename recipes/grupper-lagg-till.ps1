@@ -4,8 +4,8 @@ kategori:    Grupper
 typ:         ändrar
 kräver:      graph:GroupMember.ReadWrite.All,User.Read.All
 beskrivning: Lägger till användare i en Microsoft 365- eller säkerhetsgrupp. (Distributionslistor: använd Exchange-receptet.)
-param:       Grupp | Gruppens namn eller e-post |
-param:       Anvandare | Användare (UPN, flera med komma) |
+param:       Grupp | Gruppens namn eller e-post | | @group
+param:       Anvandare | Användare (UPN, flera med komma) | | @user+
 param:       Roll | Som | Medlem | Medlem,Ägare
 #>
 $q = $Grupp -replace "'", "''"

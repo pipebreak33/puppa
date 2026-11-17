@@ -4,7 +4,7 @@ kategori:    SharePoint
 typ:         läs
 kräver:      pnp:Url
 beskrivning: Vem har åtkomst? Webbplatsadministratörer, SharePoint-grupper och deras medlemmar.
-param:       Url | Sajtens URL | {rootUrl}/sites/
+param:       Url | Sajtens URL | {rootUrl}/sites/ | @site
 #>
 Get-PnPSiteCollectionAdmin | ForEach-Object {
     [pscustomobject]@{ Grupp = '(Webbplatsadministratör)'; Roll = 'Full kontroll'; Medlem = $_.Title; Konto = $_.Email }

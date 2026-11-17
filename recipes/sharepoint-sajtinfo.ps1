@@ -4,7 +4,7 @@ kategori:    SharePoint
 typ:         läs
 kräver:      pnp-admin
 beskrivning: Ägare, mall, lagring, delning, låsstatus och kopplad grupp för en sajt.
-param:       Url | Sajtens URL | {rootUrl}/sites/
+param:       Url | Sajtens URL | {rootUrl}/sites/ | @site
 #>
 $s = Get-PnPTenantSite -Identity $Url -Detailed -ErrorAction Stop
 [pscustomobject]@{

@@ -4,7 +4,7 @@ kategori:    Exchange
 typ:         läs
 kräver:      exo
 beskrivning: Går igenom alla delade postlådor (tar en stund i stora tenanter).
-param:       Anvandare | Användare (UPN) |
+param:       Anvandare | Användare (UPN) | | @recipient
 #>
 Get-EXOMailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | ForEach-Object {
     $m = $_

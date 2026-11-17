@@ -4,7 +4,7 @@ kategori:    Användare
 typ:         läs
 kräver:      graph:User.Read.All
 beskrivning: Konto, licenser, chef, senaste lösenordsbyte och om kontot är aktivt.
-param:       Anvandare | Användare (UPN) |
+param:       Anvandare | Användare (UPN) | | @user
 #>
 $u = Get-MgUser -UserId $Anvandare -Property id,displayName,userPrincipalName,accountEnabled,jobTitle,department,createdDateTime,lastPasswordChangeDateTime,usageLocation,assignedLicenses,userType -ErrorAction Stop
 $sku = @{}; Get-MgSubscribedSku -All | ForEach-Object { $sku["$($_.SkuId)"] = $_.SkuPartNumber }

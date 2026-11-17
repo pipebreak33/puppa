@@ -1,0 +1,179 @@
+<#
+ Puppa för Windows (Windows PowerShell 5.1 eller PowerShell 7). Fungerar även i pwsh på macOS/Linux.
+ Installera eller uppdatera (kör igen = senaste versionen):
+   irm https://raw.githubusercontent.com/pipebreak33/puppa/main/install.ps1 | iex
+ Från en lokal kopia:  ./install.ps1
+ Styr källan med $env:PUPPA_REPO = 'ägare/repo' och $env:PUPPA_BRANCH = 'gren eller tagg'.
+ Inga frågor. Fel = ett avslutande fel (exitkod ≠ 0 med -File).
+
+ Puppa är ett Python-skript utan beroenden. Saknas Python 3.8+ installeras det:
+   1. med winget (per användare), annars
+   2. direkt från python.org (per användare, inga adminrättigheter).
+#>
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+}
+$Repo   = if ($env:PUPPA_REPO)   { $env:PUPPA_REPO }   else { 'pipebreak33/puppa' }
+$Branch = if ($env:PUPPA_BRANCH) { $env:PUPPA_BRANCH } else { 'main' }
+$OnWindows = ($PSVersionTable.PSEdition -ne 'Core') -or $IsWindows
+$Dir = Join-Path $HOME '.puppa'
+$App = Join-Path $Dir 'app'
+$PyVersion = '3.12.8'
+
+function Say($m)  { Write-Host "  P› $m" -ForegroundColor Cyan }
+function Warn($m) { Write-Host "  ! $m" -ForegroundColor Yellow }
+
+function Update-SessionPath {
+    if (-not $OnWindows) { return }
+    $env:Path = (@([Environment]::GetEnvironmentVariable('Path', 'Machine'),
+                   [Environment]::GetEnvironmentVariable('Path', 'User'),
+                   (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps')) | Where-Object { $_ }) -join ';'
+}
+
+function Test-Python($exe, $extra) {
+    try {
+        & $exe @($extra + @('-c', 'import sys; sys.exit(sys.version_info < (3,8))')) 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } catch { return $false }
+}
+
+function Find-Python {
+    $candidates = if ($OnWindows) { @(@('py', '-3'), @('python'), @('python3')) } else { @(@('python3'), @('python')) }
+    foreach ($c in $candidates) {
+        $cmd = Get-Command $c[0] -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $cmd) { continue }
+        $extra = @($c | Select-Object -Skip 1)
+        # Microsoft Store-aliaset python.exe startar inget riktigt Python – Test-Python sorterar bort det
+        if (Test-Python $cmd.Source $extra) { return , (@($cmd.Source) + $extra) }
+    }
+    if ($OnWindows) {
+        foreach ($p in @("$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+                         "$env:LOCALAPPDATA\Programs\Python\Launcher\py.exe")) {
+            if (Test-Path $p) {
+                $extra = if ($p -like '*py.exe') { @('-3') } else { @() }
+                if (Test-Python $p $extra) { return , (@($p) + $extra) }
+            }
+        }
+    }
+    return $null
+}
+
+function Install-Python {
+    if (-not $OnWindows) {
+        throw 'Python 3.8+ saknas. macOS: xcode-select --install (eller brew install python). Linux: sudo apt install python3.'
+    }
+    Update-SessionPath
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Say 'Installerar Python 3 med winget'
+        winget install --id Python.Python.3.12 -e --scope user --silent --accept-package-agreements --accept-source-agreements
+        if ($LASTEXITCODE -eq 0) { Update-SessionPath; return }
+        Warn 'winget kunde inte installera Python, provar python.org'
+    }
+    $arch = switch ($env:PROCESSOR_ARCHITECTURE) { 'ARM64' { '-arm64' } 'x86' { '' } default { '-amd64' } }
+    $url = "https://www.python.org/ftp/python/$PyVersion/python-$PyVersion$arch.exe"
+    $exe = Join-Path $env:TEMP "python-$PyVersion-setup.exe"
+    Say "Hämtar Python $PyVersion från python.org"
+    Invoke-WebRequest $url -OutFile $exe -UseBasicParsing
+    $p = Start-Process $exe -ArgumentList '/quiet', 'InstallAllUsers=0', 'PrependPath=1', 'Include_launcher=1',
+                                         'Include_test=0', 'Shortcuts=0' -Wait -PassThru
+    Remove-Item $exe -ErrorAction SilentlyContinue
+    if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "Python-installationen misslyckades (kod $($p.ExitCode))." }
+    Update-SessionPath
+}
+
+function Invoke-Py([string[]]$more) {
+    & $py[0] @(@($py | Select-Object -Skip 1) + $more)
+}
+
+# 1. Python
+$py = Find-Python
+if (-not $py) {
+    Install-Python
+    $py = Find-Python
+    if (-not $py) { throw 'Python installerades men syns inte än. Öppna ett NYTT PowerShell-fönster och kör installationen igen.' }
+}
+
+# 2. Källan: en lokal checkout bredvid skriptet, annars arkivet från GitHub
+$src = $null
+$tmp = $null
+if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'puppa.py')) -and
+    (Test-Path (Join-Path $PSScriptRoot 'recipes')) -and $env:PUPPA_FROM_WEB -ne '1') {
+    $src = $PSScriptRoot
+    Say "Installerar från $src"
+}
+try {
+    if (-not $src) {
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ("puppa-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $zip = Join-Path $tmp 'puppa.zip'
+        Say "Hämtar Puppa från github.com/$Repo ($Branch)"
+        Invoke-WebRequest "https://github.com/$Repo/archive/$Branch.zip" -OutFile $zip -UseBasicParsing
+        Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force
+        $found = Get-ChildItem -Path $tmp -Filter 'puppa.py' -Recurse -Depth 2 | Select-Object -First 1
+        if (-not $found -or -not (Test-Path (Join-Path $found.DirectoryName 'recipes'))) { throw 'Arkivet innehåller inte Puppa.' }
+        $src = $found.DirectoryName
+    }
+    Invoke-Py @('-c', 'import ast,sys; ast.parse(open(sys.argv[1],encoding="utf-8").read())', (Join-Path $src 'puppa.py'))
+    if ($LASTEXITCODE -ne 0) { throw 'puppa.py är trasig.' }
+
+    # 3. Byt ut programmet (~/.puppa/app). Dina tenants, inställningar och egna recept i ~/.puppa rörs inte.
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    $new = "$App.new"
+    if (Test-Path $new) { Remove-Item $new -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $new | Out-Null
+    Copy-Item (Join-Path $src 'puppa.py') $new -Force
+    Copy-Item (Join-Path $src 'recipes') (Join-Path $new 'recipes') -Recurse -Force
+    foreach ($f in 'README.md', 'LICENSE') { $s = Join-Path $src $f; if (Test-Path $s) { Copy-Item $s $new -Force } }
+    if (Test-Path $App) { Remove-Item $App -Recurse -Force }
+    Move-Item $new $App
+} finally {
+    if ($tmp -and (Test-Path $tmp)) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+$target = Join-Path $App 'puppa.py'
+
+# 4. Startkommando + PATH
+if ($OnWindows) {
+    $bin = Join-Path $Dir 'bin'
+    New-Item -ItemType Directory -Force -Path $bin | Out-Null
+    # Citera bara exe-filen: py-startaren skickar annars vidare ett citerat "-3" till python.exe
+    $launcher = '"' + $py[0] + '"' + ((@($py | Select-Object -Skip 1) | ForEach-Object { " $_" }) -join '') +
+                ' "%USERPROFILE%\.puppa\app\puppa.py" %*'
+    Set-Content -Path (Join-Path $bin 'puppa.cmd') -Value "@echo off`r`n$launcher" -Encoding ASCII
+    $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (-not $user) { $user = '' }
+    if (($user -split ';') -notcontains $bin) {
+        [Environment]::SetEnvironmentVariable('Path', (($user.TrimEnd(';') + ';' + $bin).TrimStart(';')), 'User')
+        Say 'La till Puppa i din PATH.'
+    }
+    if (($env:Path -split ';') -notcontains $bin) { $env:Path += ";$bin" }
+} else {
+    $bin = Join-Path $HOME '.local/bin'
+    New-Item -ItemType Directory -Force -Path $bin | Out-Null
+    $shim = Join-Path $bin 'puppa'
+    # En ev. gammal symlänk tas bort först – skriv aldrig genom den
+    if (Test-Path $shim) { Remove-Item $shim -Force }
+    Set-Content -Path $shim -Value "#!/usr/bin/env sh`nexec `"$($py[0])`" `"$target`" `"`$@`"`n" -NoNewline
+    chmod +x $shim
+    if ((($env:PATH -split ':') -notcontains $bin)) {
+        Warn "Lägg till $bin i PATH (t.ex. i ~/.zshrc: export PATH=`"`$HOME/.local/bin:`$PATH`")"
+    }
+}
+
+# 5. Förutsättningar: PowerShell 7 och modulerna (bara varningar – Puppa är installerat ändå)
+$pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+if ($pwsh) {
+    $mods = 'PnP.PowerShell', 'ExchangeOnlineManagement', 'MicrosoftTeams', 'Microsoft.Graph.Authentication',
+            'Microsoft.PowerShell.SecretManagement', 'Microsoft.PowerShell.SecretStore', 'ImportExcel'
+    $missing = @(& $pwsh.Source -NoLogo -NoProfile -NonInteractive -Command ("'" + ($mods -join "','") + "' | Where-Object { -not (Get-Module -ListAvailable -Name `$_) }") 2>$null)
+    if ($missing.Count) {
+        Warn "Moduler som saknas: $($missing -join ', ')"
+        Warn "Installera: pwsh -c 'Install-PSResource $($missing -join ',') -Scope CurrentUser -TrustRepository'   (eller: uppa install m365)"
+    }
+} else {
+    Warn 'PowerShell 7 (pwsh) saknas. Installera: winget install Microsoft.PowerShell   (eller: uppa install powershell)'
+}
+
+$ver = Invoke-Py @($target, '--version') 2>$null
+Write-Host "`n  ✔ $ver installerad. Öppna en ny terminal och kör: puppa`n" -ForegroundColor Green

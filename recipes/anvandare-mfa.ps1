@@ -4,7 +4,7 @@ kategori:    Användare
 typ:         läs
 kräver:      graph:UserAuthenticationMethod.Read.All
 beskrivning: Vilka MFA-metoder en användare har registrerat.
-param:       Anvandare | Användare (UPN) |
+param:       Anvandare | Användare (UPN) | | @user
 #>
 Get-MgUserAuthenticationMethod -UserId $Anvandare -All | ForEach-Object {
     $a = $_.AdditionalProperties

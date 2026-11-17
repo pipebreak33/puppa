@@ -6,7 +6,7 @@ kräver:      exo
 beskrivning: Ny delad postlåda, valfritt med medlemmar som får fullbehörighet och Skicka som.
 param:       Adress | E-postadress (t.ex. kundservice@contoso.se) |
 param:       Namn | Visningsnamn |
-param:       Medlemmar? | Medlemmar (UPN, flera med komma) |
+param:       Medlemmar? | Medlemmar (UPN, flera med komma) | | @recipient+
 param:       SkickatSparas | Spara skickat som även i den delade postlådan? | Ja | Ja,Nej
 #>
 $alias = ($Adress -split '@')[0]

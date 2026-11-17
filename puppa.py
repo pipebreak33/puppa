@@ -1,30 +1,35 @@
 #!/usr/bin/env python3
-"""puppa – vanliga M365-adminuppgifter i PowerShell med några knapptryck.
+"""puppa – vanliga M365-adminuppgifter i PowerShell med några knapptryck. Windows, macOS och Linux.
 
   puppa                    meny
-  puppa ny                 guide: ny PnP-profil (registrera Entra ID-app eller ange ClientId)
-  puppa profiler           lista sparade profiler
-  puppa använd PROFIL      gör en profil aktiv
-  puppa test [PROFIL]      testa PnP-anslutningen
-  puppa skal [PROFIL]      öppna ett pwsh-skal som redan är anslutet med Connect-PnPOnline
+  puppa kunder             sparade kunder (tenant + konto)
+  puppa kund NAMN          växla kund
+  puppa ny                 lägg till en kund (tenant, valfritt konto)
+  puppa pnp [KUND]         sätt upp SharePoint/PnP för en kund (Entra ID-app eller befintligt ClientId)
+  puppa test [KUND]        testa PnP-anslutningen
+  puppa skal [KUND]        pwsh-skal som redan kört Connect-PnPOnline
   puppa recept             lista recept
   puppa kör RECEPT [Namn=värde …] [--ja]   kör ett recept (frågar efter det som saknas)
   puppa logga-ut           logga ut från PnP, Exchange, Teams och Graph (rensar sparade inloggningar)
   puppa hej
 
+Inga kunder behöver skapas i förväg: Exchange-, Teams- och Graph-recept loggar in direkt och sparar
+tenant + konto som en kund, så att du kan växla mellan kunder. SharePoint-recept går via PnP PowerShell,
+som kräver en Entra ID-app per tenant – Puppa frågar efter den första gången.
+
 Flaggor: -n/--torr visar kommandon utan att köra något · --no-anim stänger av animationer.
-Profiler: ~/.puppa/profiles.json (inga hemligheter). Certifikatlösenord: macOS Keychain (tjänst "puppa").
-Egna recept: ~/.puppa/recipes/*.ps1. Enbart standardbiblioteket, Python 3.8+, kräver pwsh.
+Data: ~/.puppa (kunder.json, inga hemligheter). Certifikatlösenord: SecretManagement-valvet "Puppa".
+Egna recept: ~/.puppa/recipes/*.ps1. Enbart standardbiblioteket, Python 3.8+, kräver pwsh (PowerShell 7).
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import queue
 import random
 import re
 import secrets
-import select
 import shutil
 import signal
 import subprocess
@@ -35,21 +40,95 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 HOME = Path.home()
 DIR = Path(os.environ.get("PUPPA_DIR") or HOME / ".puppa")
 os.environ["PUPPA_DIR"] = str(DIR)
-PROFILES = DIR / "profiles.json"
+CUSTOMERS = DIR / "kunder.json"
+LEGACY_PROFILES = DIR / "profiles.json"
 CONFIG = DIR / "config.json"
 CERTS = DIR / "certs"
 USER_RECIPES = DIR / "recipes"
 APP_DIR = Path(os.path.realpath(__file__)).parent
 RECIPES = APP_DIR / "recipes"
-EXPORTS = HOME / "Documents" / "Puppa"
-KC_SERVICE = "puppa"
-for _p in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/local/microsoft/powershell/7"):
-    if _p not in os.environ.get("PATH", "").split(os.pathsep):
-        os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + _p
+VAULT = "Puppa"
+IS_WIN = os.name == "nt"
+IS_MAC = sys.platform == "darwin"
+if IS_WIN:
+    _PF = os.environ.get("ProgramFiles", r"C:\Program Files")
+    _LA = os.environ.get("LOCALAPPDATA", str(HOME / "AppData" / "Local"))
+    EXTRA_PATH = [os.path.join(_PF, "PowerShell", "7"), os.path.join(_LA, "Microsoft", "WindowsApps")]
+else:
+    EXTRA_PATH = ["/opt/homebrew/bin", "/home/linuxbrew/.linuxbrew/bin", "/usr/local/bin",
+                  "/usr/local/microsoft/powershell/7", "/snap/bin", "/usr/bin", "/bin"]
+os.environ["PATH"] = os.pathsep.join(dict.fromkeys(os.environ.get("PATH", "").split(os.pathsep) + EXTRA_PATH))
+
+
+def _win_console():
+    """UTF-8 + ANSI-färger i Windows-konsolen (Windows Terminal, conhost, VS Code)."""
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        k.SetConsoleOutputCP(65001)
+        k.SetConsoleCP(65001)
+        h = k.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if k.GetConsoleMode(h, ctypes.byref(mode)):
+            k.SetConsoleMode(h, mode.value | 0x0004)       # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
+
+
+if IS_WIN:
+    _win_console()
+
+
+def pwsh_exe():
+    return shutil.which("pwsh") or "pwsh"
+
+
+def ps_args(script, *flags):
+    """pwsh med -EncodedCommand: inga citat-/escape-problem på varken Windows eller Unix."""
+    enc = base64.b64encode(script.encode("utf-16-le")).decode()
+    return [pwsh_exe(), "-NoLogo", "-NoProfile", *flags, "-EncodedCommand", enc]
+
+
+def detached():
+    """Arbetsprocessen ska inte få Ctrl+C från terminalen – Puppa avbryter den själv."""
+    return {"creationflags": 0x00000200} if IS_WIN else {"start_new_session": True}
+
+
+def copy_text(s):
+    for cmd in (["pbcopy"], ["clip"], ["wl-copy"], ["xclip", "-selection", "clipboard"]):
+        exe = shutil.which(cmd[0])
+        if exe:
+            try:
+                subprocess.run([exe] + cmd[1:], input=s, text=True, timeout=5)
+                return True
+            except Exception:
+                return False
+    return False
+
+
+def open_file(path):
+    code = shutil.which("code")
+    try:
+        if code:
+            subprocess.Popen([code, str(path)])
+        elif IS_WIN:
+            os.startfile(str(path))                              # noqa – finns bara på Windows
+        elif IS_MAC:
+            subprocess.Popen(["open", "-t", str(path)])
+        else:
+            subprocess.Popen([shutil.which("xdg-open") or "xdg-open", str(path)])
+    except Exception:
+        out(dim(f"  Öppna själv: {path}"))
+
 
 # ───────────────────────────── terminal ─────────────────────────────
 TTY = sys.stdout.isatty()
@@ -282,18 +361,45 @@ class Cancel(Exception):
     pass
 
 
-def raw_keys():
-    import termios
-    import tty
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    tty.setcbreak(fd)
-    return fd, old
+class Keys:
+    """Rå tangentläsning. Windows: msvcrt. macOS/Linux: termios + select. read() ger None vid timeout,
+    så menyerna kan animera och rita om när fönstret ändrat storlek (även där SIGWINCH saknas)."""
 
+    def __enter__(self):
+        if IS_WIN:
+            import msvcrt
+            self.m = msvcrt
+        else:
+            import termios
+            import tty
+            self.fd = sys.stdin.fileno()
+            self.old = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd)
+        sys.stdout.write("\033[?25l")
+        sys.stdout.flush()
+        return self
 
-def restore_keys(fd, old):
-    import termios
-    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    def __exit__(self, *a):
+        if not IS_WIN:
+            import termios
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
+        sys.stdout.write("\033[?25h")
+        sys.stdout.flush()
+
+    def read(self, timeout=0.12):
+        if IS_WIN:
+            end = time.time() + timeout
+            while time.time() < end:
+                if self.m.kbhit():
+                    ch = self.m.getwch()
+                    if ch in ("\x00", "\xe0"):
+                        return {"H": "\x1b[A", "P": "\x1b[B", "K": "\x1b[D", "M": "\x1b[C"}.get(self.m.getwch(), "")
+                    return ch
+                time.sleep(0.02)
+            return None
+        import select
+        r, _, _ = select.select([self.fd], [], [], timeout)
+        return os.read(self.fd, 8).decode(errors="ignore") if r else None
 
 
 def new_screen():
@@ -307,131 +413,233 @@ def new_screen():
         sys.stdout.flush()
 
 
-def choose(rows, title="", msg="", mood="happy", sub="", status=None, start=None, footer=None, screen=False):
+def fuzzy_score(query, text, loose=True):
+    """Fuzzy-match: alla ord i frågan måste finnas i texten, som delsträng (bäst) eller som bokstäver i ordning.
+    Högre = bättre. None = ingen träff."""
+    text = ANSI.sub("", text).lower()
+    total = 0
+    for word in query.lower().split():
+        i = text.find(word)
+        if i >= 0:
+            start = i == 0 or not text[i - 1].isalnum()
+            total += 100 + (40 if start else 0) - min(i, 30)
+            continue
+        if len(word) < 3 or not loose:       # korta sökord / långa texter: bara som delsträng
+            return None
+        pos, gaps, last = 0, 0, -1
+        for ch in word:
+            j = text.find(ch, pos)
+            if j < 0:
+                return None
+            if last >= 0:
+                gaps += j - last - 1
+            last, pos = j, j + 1
+        if gaps > 2 * len(word):             # för utspritt för att vara det man menade
+            return None
+        total += max(1, 60 - gaps * 3)
+    return total
+
+
+def fuzzy_rank(query, items, key):
+    if not query.strip():
+        return list(items)
+    scored = [(fuzzy_score(query, key(x)), n, x) for n, x in enumerate(items)]
+    return [x for s, n, x in sorted([y for y in scored if y[0] is not None], key=lambda y: (-y[0], y[1]))]
+
+
+def choose(rows, title="", msg="", mood="happy", sub="", status=None, start=None, footer=None, screen=False,
+           search_rows=None):
     """Piltangent-meny. rows: ("head", text) eller dict(label, hint, value, badge, key).
-    Siffra väljer direkt, q/esc avbryter (→ None). Maskoten blinkar medan den väntar.
+    Siffra väljer direkt, q/esc avbryter (→ None). Börja skriva för att fuzzy-söka (search_rows = sök i en
+    större lista, t.ex. alla recept). Maskoten blinkar medan den väntar.
     screen=True: menyn ritas på en tom skärm (navigeringsmenyer), annars där markören står (frågor i ett flöde)."""
     if not ITTY:
         raise Cancel()
     if screen:
         new_screen()
-    sel = [k for k, r in enumerate(rows) if not isinstance(r, tuple)]
+    hot = {r["key"] for r in rows if not isinstance(r, tuple) and r.get("key")}
+    st = {"q": "", "pos": 0, "top": 0, "mood": None}
+
+    def view():
+        if st["q"]:
+            pool = [r for r in (search_rows if search_rows is not None else rows) if not isinstance(r, tuple)]
+            pool = [r for r in pool if r.get("value") is not None]
+            q = st["q"]
+            scored = []
+            for n, r in enumerate(pool):
+                a = fuzzy_score(q, r["label"])
+                b = fuzzy_score(q, r["label"] + " " + ANSI.sub("", r.get("hint") or "") + " " + (r.get("search") or ""),
+                                loose=False)
+                if a is None and r.get("search"):
+                    a = fuzzy_score(q, r["search"])
+                sc = max(a * 2 if a is not None else -1, b if b is not None else -1)
+                if sc >= 0:
+                    scored.append((-sc, n, r))
+            return [r for _, _, r in sorted(scored, key=lambda x: (x[0], x[1]))]
+        return rows
+
+    def numbering(vr):
+        sel = [k for k, r in enumerate(vr) if not isinstance(r, tuple)]
+        keys, n = {}, 0
+        for k in sel:
+            r = vr[k]
+            if r.get("key") and not st["q"]:
+                keys[r["key"]] = k
+            else:
+                n += 1
+                if n <= 9:
+                    keys[str(n)] = k
+        return sel, keys
+
+    vr = view()
+    sel, keys = numbering(vr)
     if not sel:
         return None
-    keys = {}
-    n = 0
-    for k in sel:
-        r = rows[k]
-        if r.get("key"):
-            keys[r["key"]] = k
-        else:
-            n += 1
-            if n <= 9:
-                r["_num"] = str(n)
-                keys[str(n)] = k
-    pos = sel[0]
+    st["pos"] = sel[0]
     if start is not None:
         for k in sel:
-            if rows[k]["value"] == start:
-                pos = k
-    top = 0
+            if vr[k]["value"] == start:
+                st["pos"] = k
     live = Live()
     winch = {"flag": False}
     t0 = time.time()
-    state = {"mood": None}
 
     def draw(mood_now):
-        nonlocal top
         w = width()
         lines = []
-        if msg:
+        if msg and not st["q"]:
             lines += frame(msg, mood_now, sub=sub)
         if status:
             lines += [""] + status()
         lines.append("")
-        if title:
+        if st["q"]:
+            lines.append("  " + accent("⌕ ") + bold(st["q"]) + accent("▏") + dim(f"  {len(sel)} träffar"))
+        elif title:
             lines.append("  " + accent("▍") + bold(title))
         narrow = w < 58
-        labels = [rows[k]["label"] for k in sel]
+        if not sel:
+            lines.append("     " + dim("Inga träffar. Backsteg ändrar, esc rensar."))
+        labels = [vr[k]["label"] for k in sel] or [""]
         lw = min(max(len(x) for x in labels) + 2, max(10, w - 14 if narrow else min(34, w // 2)))
-        room = height() - len(lines) - 3
-        room = max(3, room)
-        top = min(max(top, pos - room + 1), pos)
-        top = max(0, min(top, max(0, len(rows) - room)))
+        room = max(3, height() - len(lines) - 3)
+        pos = st["pos"]
+        top = min(max(st["top"], pos - room + 1), pos)
+        top = max(0, min(top, max(0, len(vr) - room)))
+        st["top"] = top
         if top > 0:
             lines.append(dim("     ↑ fler"))
-        for k in range(top, min(len(rows), top + room)):
-            r = rows[k]
+        num = {k: n for n, k in keys.items()}
+        anybadge = any(vr[j].get("badge") for j in sel)
+        for k in range(top, min(len(vr), top + room)):
+            r = vr[k]
             if isinstance(r, tuple):
                 lines.append("   " + dim(cut(r[1].upper(), w - 5)))
                 continue
             on = k == pos
-            key = r.get("key") or r.get("_num") or " "
+            key = num.get(k, " ")
             label = cut(r["label"], lw - 1)
             label = bold(accent(label)) if on else label
             badge = r.get("badge") or ""
             if narrow:
-                line = f"  {accent('❯') if on else ' '}{dim(key)} {label}" + (" " + badge if badge else "")
+                line = f"  {accent('❯') if on else ' '}{dim(key)} " + (pad(label, lw) + badge if anybadge else label)
             else:
-                line = f"   {accent('❯') if on else ' '} {dim(key)}  " + pad(label, lw) + \
-                       (pad(badge, 8) if badge or any(rows[j].get("badge") for j in sel) else "")
+                line = f"   {accent('❯') if on else ' '} {dim(key)}  " + pad(label, lw) + (pad(badge, 8) if anybadge else "")
                 if r.get("hint") and w >= 64:
-                    line += dim(r["hint"])
+                    line += dim(ANSI.sub("", r["hint"]))
             lines.append(line)
-        if top + room < len(rows):
+        if top + room < len(vr):
             lines.append(dim("     ↓ fler"))
         lines.append("")
-        help_ = (footer or "↑/↓ · enter · siffra väljer · q tillbaka") if w >= 50 else "↑↓ enter · q"
+        if st["q"]:
+            help_ = "↑/↓ · enter väljer · backsteg · esc rensar" if w >= 50 else "↑↓ enter · esc"
+        else:
+            help_ = ((footer or "↑/↓ · enter · siffra väljer · q tillbaka") + " · skriv för att söka") if w >= 72 else \
+                (footer or "↑/↓ · enter · q tillbaka") if w >= 50 else "↑↓ enter · q"
         lines.append(dim("   " + help_))
         live.draw(lines)
+
+    def refilter():
+        nonlocal vr, sel, keys
+        vr = view()
+        sel, keys = numbering(vr)
+        st["pos"] = sel[0] if sel else 0
+        st["top"] = 0
 
     def on_winch(*_):
         winch["flag"] = True
 
-    old_winch = signal.signal(signal.SIGWINCH, on_winch)
-    fd, old = raw_keys()
+    old_winch = signal.signal(signal.SIGWINCH, on_winch) if hasattr(signal, "SIGWINCH") else None
+    size = shutil.get_terminal_size((100, 30))
     choice = None
+    picked = None
+    kb = Keys()
     try:
-        sys.stdout.write("\033[?25l")
+        kb.__enter__()
         draw(mood)
         while True:
-            r, _, _ = select.select([fd], [], [], 0.12)
-            if not r:
+            ch = kb.read(0.12)
+            if ch is None:
+                now = shutil.get_terminal_size((100, 30))
+                if now != size:              # fönstret ändrat storlek (Windows har ingen SIGWINCH)
+                    size = now
+                    winch["flag"] = True
                 m = mood
-                if ANIM:
+                if ANIM and not st["q"]:
                     im = idle_mood(time.time() - t0)
                     m = im if mood == "happy" else ("blink" if im == "blink" else mood)
-                if winch["flag"] or m != state["mood"]:
+                if winch["flag"] or m != st["mood"]:
                     winch["flag"] = False
-                    state["mood"] = m
+                    st["mood"] = m
                     draw(m)
                 continue
-            ch = os.read(fd, 8).decode(errors="ignore")
-            idx = sel.index(pos)
-            if ch in ("\x1b[A", "k", "\x1bOA"):
-                pos = sel[(idx - 1) % len(sel)]
-            elif ch in ("\x1b[B", "j", "\x1bOB"):
-                pos = sel[(idx + 1) % len(sel)]
-            elif ch in keys:
-                pos = keys[ch]
-                choice = rows[pos]["value"]
-                break
+            idx = sel.index(st["pos"]) if st["pos"] in sel else 0
+            if ch in ("\x1b[A", "\x1bOA"):
+                if sel:
+                    st["pos"] = sel[(idx - 1) % len(sel)]
+            elif ch in ("\x1b[B", "\x1bOB"):
+                if sel:
+                    st["pos"] = sel[(idx + 1) % len(sel)]
             elif ch in ("\r", "\n"):
-                choice = rows[pos]["value"]
+                if sel:
+                    picked = vr[st["pos"]]
+                    choice = picked["value"]
+                    break
+            elif ch in ("\x7f", "\x08"):
+                if st["q"]:
+                    st["q"] = st["q"][:-1]
+                    refilter()
+            elif ch == "\x1b":
+                if st["q"]:
+                    st["q"] = ""
+                    refilter()
+                else:
+                    break
+            elif ch in ("\x03", "\x04"):
                 break
-            elif ch in ("q", "\x1b", "\x03", "\x04"):
+            elif not st["q"] and ch.isdigit() and ch in keys:
+                picked = vr[keys[ch]]
+                choice = picked["value"]
                 break
-            draw(state["mood"] or mood)
+            elif not st["q"] and ch in hot:
+                picked = vr[keys[ch]]
+                choice = picked["value"]
+                break
+            elif not st["q"] and ch == "q":
+                break
+            elif ch and not ch.startswith("\x1b") and ch.isprintable() and (st["q"] or not ch.startswith(" ")):
+                st["q"] += ch                    # även inklistrat / snabbt skrivet (flera tecken på en gång)
+                refilter()
+            draw(st["mood"] or mood)
     except KeyboardInterrupt:
         choice = None
     finally:
-        signal.signal(signal.SIGWINCH, old_winch)
-        restore_keys(fd, old)
+        if old_winch is not None:
+            signal.signal(signal.SIGWINCH, old_winch)
+        kb.__exit__()
         live.clear()
-        sys.stdout.write("\033[?25h")
         sys.stdout.flush()
     if choice is not None and not screen:
-        out(f"   {accent('❯')} {bold(rows[pos]['label'])}")
+        out(f"   {accent('❯')} {bold(picked['label'])}")
     return choice
 
 
@@ -494,6 +702,16 @@ def pause():
 
 
 # ───────────────────────────── lagring ─────────────────────────────
+GUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def private(path):
+    try:
+        os.chmod(path, 0o700 if Path(path).is_dir() else 0o600)
+    except OSError:
+        pass
+
+
 def load_json(path, default):
     try:
         with open(path, encoding="utf-8") as f:
@@ -504,11 +722,11 @@ def load_json(path, default):
 
 def save_json(path, data):
     DIR.mkdir(parents=True, exist_ok=True)
-    os.chmod(DIR, 0o700)
+    private(DIR)
     tmp = Path(str(path) + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=1, ensure_ascii=False)
-    os.chmod(tmp, 0o600)
+    private(tmp)
     os.replace(tmp, path)
 
 
@@ -522,51 +740,226 @@ def set_config(**kw):
     save_json(CONFIG, cfg)
 
 
-def profiles():
-    return load_json(PROFILES, {"profiles": []}).get("profiles", [])
+# En "tenant" = en kunds tenant som du loggat in i: domän, tenant-id, konto och (valfritt) PnP-app.
+def tenants():
+    d = load_json(CUSTOMERS, None)
+    if d is None:
+        old = load_json(LEGACY_PROFILES, {}).get("profiles")
+        if old:
+            save_json(CUSTOMERS, {"tenants": old})
+            return old
+        return []
+    return d.get("tenants", [])
 
 
-def save_profiles(ps):
-    save_json(PROFILES, {"profiles": ps})
+def save_tenants(ts):
+    save_json(CUSTOMERS, {"tenants": ts})
 
 
-def find_profile(name):
+def find_tenant(name):
     if not name:
         return None
-    for p in profiles():
-        if p["name"].lower() == name.lower():
-            return p
-    hits = [p for p in profiles() if p["name"].lower().startswith(name.lower())]
+    n = name.lower()
+    ts = tenants()
+    for t in ts:
+        if n in (t["name"].lower(), t.get("tenant", "").lower(), t.get("tenant_id", "").lower()):
+            return t
+    hits = [t for t in ts if t["name"].lower().startswith(n) or t.get("tenant", "").lower().startswith(n)]
     return hits[0] if len(hits) == 1 else None
 
 
-def active_profile():
-    return find_profile(config().get("active"))
+def active_tenant():
+    return find_tenant(config().get("active"))
+
+
+def update_tenant(name, **kw):
+    ts = tenants()
+    for t in ts:
+        if t["name"] == name:
+            t.update(kw)
+    save_tenants(ts)
 
 
 def slug(s):
-    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") or "profil"
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") or "tenant"
 
 
-# macOS Keychain: bara certifikatlösenord. `security -i` så att hemligheten aldrig syns i processlistan.
-def kc_q(s):
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+def unique_name(base, ts):
+    names = {t["name"].lower() for t in ts}
+    name, k = base, 2
+    while name.lower() in names:
+        name, k = f"{base} {k}", k + 1
+    return name
 
 
-def kc_set(account, secret):
-    cmd = f'add-generic-password -U -s {KC_SERVICE} -a "{kc_q(account)}" -l "Puppa {kc_q(account)}" -w "{kc_q(secret)}"\n'
-    subprocess.run(["security", "-i"], input=cmd, text=True, capture_output=True)
-    return kc_get(account) == secret
+def tenant_info(t):
+    """'contoso' / 'contoso.onmicrosoft.com' / 'contoso.se' / en SharePoint-URL -> (tenant, sharepoint-prefix)."""
+    t = t.strip().lower()
+    t = re.sub(r"^https?://", "", t).split("/")[0]
+    if t.endswith(".sharepoint.com"):
+        pre = t.split(".")[0].replace("-admin", "")
+        return pre + ".onmicrosoft.com", pre
+    if GUID.match(t):
+        return t, ""
+    if "." not in t:
+        return t + ".onmicrosoft.com", t
+    if t.endswith(".onmicrosoft.com"):
+        return t, t.split(".")[0]
+    return t, ""
 
 
-def kc_get(account):
-    p = subprocess.run(["security", "find-generic-password", "-s", KC_SERVICE, "-a", account, "-w"],
-                       capture_output=True, text=True)
-    return p.stdout.rstrip("\n") if p.returncode == 0 else None
+def sp_fields(prefix):
+    return {"prefix": prefix, "admin_url": f"https://{prefix}-admin.sharepoint.com",
+            "root_url": f"https://{prefix}.sharepoint.com"} if prefix else {}
 
 
-def kc_del(account):
-    subprocess.run(["security", "delete-generic-password", "-s", KC_SERVICE, "-a", account], capture_output=True)
+def remember_login(who):
+    """Efter en lyckad inloggning: spara/uppdatera tenanten (domän, id, konto) och gör den aktiv."""
+    tid, upn, domain, org = (list(who) + ["", "", "", ""])[:4]
+    if not domain and "@" in upn:
+        domain = upn.split("@", 1)[1]
+    ts = tenants()
+    t = next((x for x in ts if tid and x.get("tenant_id", "").lower() == tid.lower()), None) or \
+        next((x for x in ts if domain and x.get("tenant", "").lower() == domain.lower()), None)
+    new = t is None
+    now = datetime.now().isoformat(timespec="seconds")
+    if new:
+        base = org or (domain.split(".")[0].capitalize() if domain else "Tenant")
+        t = dict(name=unique_name(base, ts), tenant=domain or tid, tenant_id=tid, upn=upn, client_id="",
+                 auth="interactive", created=now)
+        ts.append(t)
+    else:
+        if tid:
+            t["tenant_id"] = tid
+        if upn:
+            t["upn"] = upn
+        cur = t.get("tenant", "")
+        if domain and (not cur or GUID.match(cur) or
+                       (domain.endswith(".onmicrosoft.com") and not cur.endswith(".onmicrosoft.com"))):
+            t["tenant"] = domain
+    if not t.get("prefix") and t.get("tenant", "").endswith(".onmicrosoft.com"):
+        t.update(sp_fields(t["tenant"].split(".")[0]))
+    t["last"] = now
+    save_tenants(ts)
+    set_config(active=t["name"])
+    return t, new
+
+
+# Hemligheter (certifikatlösenord) i PowerShells SecretManagement-valv "Puppa" (SecretStore) – samma på alla OS.
+SEC_PS = r"""
+$ErrorActionPreference = 'Stop'
+Import-Module Microsoft.PowerShell.SecretManagement, Microsoft.PowerShell.SecretStore
+$V = $env:PUPPA_VAULT
+function Open-Store { if ($env:PUPPA_STORE_PW) { Unlock-SecretStore -Password (ConvertTo-SecureString $env:PUPPA_STORE_PW -AsPlainText -Force) } }
+switch ($env:PUPPA_OP) {
+  'state' {
+    $reg = [bool](Get-SecretVault -Name $V -ErrorAction SilentlyContinue)
+    try { Open-Store; $a = (Get-SecretStoreConfiguration -ErrorAction Stop).Authentication; "ok|$a|$reg" }
+    catch { if ("$_" -match 'Unlock-SecretStore|valid password|password is not') { "locked||$reg" } else { "none||$reg" } }
+  }
+  'setup' {
+    if ($env:PUPPA_STORE_PW) {
+      Set-SecretStoreConfiguration -Scope CurrentUser -Authentication Password -Interaction None -Confirm:$false `
+        -Password (ConvertTo-SecureString $env:PUPPA_STORE_PW -AsPlainText -Force)
+    } else { Set-SecretStoreConfiguration -Scope CurrentUser -Authentication None -Interaction None -Confirm:$false }
+    if (-not (Get-SecretVault -Name $V -ErrorAction SilentlyContinue)) { Register-SecretVault -Name $V -ModuleName Microsoft.PowerShell.SecretStore }
+    'ok'
+  }
+  'register' { Open-Store; if (-not (Get-SecretVault -Name $V -ErrorAction SilentlyContinue)) { Register-SecretVault -Name $V -ModuleName Microsoft.PowerShell.SecretStore }; 'ok' }
+  'get' { Open-Store; Get-Secret -Name $env:PUPPA_NAME -Vault $V -AsPlainText }
+  'set' { Open-Store; Set-Secret -Name $env:PUPPA_NAME -Vault $V -Secret $env:PUPPA_VAL; 'ok' }
+  'del' { Open-Store; Remove-Secret -Name $env:PUPPA_NAME -Vault $V -ErrorAction SilentlyContinue; 'ok' }
+}
+"""
+STORE_PW = None
+
+
+def sec_call(op, name="", value=""):
+    env = dict(os.environ, PUPPA_OP=op, PUPPA_VAULT=VAULT, PUPPA_NAME=name, PUPPA_VAL=value)
+    if STORE_PW:
+        env["PUPPA_STORE_PW"] = STORE_PW
+    try:
+        p = subprocess.run(ps_args(SEC_PS, "-NonInteractive"), capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", env=env, timeout=90, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, "", str(e)
+    return p.returncode == 0, p.stdout.strip(), p.stderr.strip()
+
+
+def store_state():
+    ok, o, _ = sec_call("state")
+    line = (o.splitlines() or ["none||False"])[-1]
+    st, _, rest = line.partition("|")
+    auth, _, reg = rest.partition("|")
+    return st, auth, reg == "True"
+
+
+def store_ready():
+    """Valvet 'Puppa' finns och är upplåst. Skapar det (med eller utan lösenord) första gången."""
+    global STORE_PW
+    st, _, reg = store_state()
+    if st == "locked":
+        for _ in range(3):
+            STORE_PW = ask_text("Lösenord till ditt SecretStore-valv", secret=True, required=True)
+            st, _, reg = store_state()
+            if st == "ok":
+                break
+            out("    " + yellow("Fel lösenord."))
+        else:
+            STORE_PW = None
+            return False
+    elif st == "none":
+        say("Certifikatlösenordet sparas krypterat i PowerShells SecretStore, i ett valv som heter Puppa. "
+            "Du har inget valv än, så jag skapar ett.", "happy")
+        how = choose([dict(label="Utan eget lösenord", hint="enklast – krypterat för ditt användarkonto", value="none"),
+                      dict(label="Med lösenord", hint="säkrare – Puppa frågar en gång per körning", value="pw")],
+                     title="Hur ska valvet låsas?")
+        if how is None:
+            raise Cancel()
+        if how == "pw":
+            a = ask_text("Välj ett lösenord för valvet", secret=True, required=True)
+            if ask_text("Samma lösenord igen", secret=True, required=True) != a:
+                say("Lösenorden var olika. Försök igen.", "sad")
+                return False
+            STORE_PW = a
+        ok, _, err = sec_call("setup")
+        if not ok:
+            say("Kunde inte skapa valvet: " + (err.splitlines() or ["okänt fel"])[-1], "sad")
+            return False
+        return True
+    if not reg:
+        ok, _, err = sec_call("register")
+        if not ok:
+            say("Kunde inte registrera valvet Puppa: " + (err.splitlines() or ["okänt fel"])[-1], "sad")
+            return False
+    return True
+
+
+def secret_name(t):
+    return "puppa-" + slug(t["name"])
+
+
+def sec_set(t, value):
+    if not store_ready():
+        return False
+    ok, _, _ = sec_call("set", secret_name(t), value)
+    return ok
+
+
+def sec_get(t):
+    ok, o, _ = sec_call("get", secret_name(t))
+    if not (ok and o):
+        try:
+            if not store_ready():
+                return None
+        except Cancel:
+            return None
+        ok, o, _ = sec_call("get", secret_name(t))
+    return o.splitlines()[-1] if ok and o else None
+
+
+def sec_del(t):
+    sec_call("del", secret_name(t))
 
 
 # ───────────────────────────── PowerShell ─────────────────────────────
@@ -582,6 +975,7 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 $PSStyle.OutputRendering = 'PlainText'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
+[Console]::InputEncoding = [Text.Encoding]::UTF8
 $global:PuppaLast = @()
 $R = [char]0x1e
 function global:Out-Puppa([string]$kind, [string]$text) { [Console]::Out.WriteLine("$R$kind " + ($text -replace "`r?`n", ' ')); [Console]::Out.Flush() }
@@ -637,12 +1031,11 @@ class Worker:
             self.conn = {}
             self.ready.clear()
             DIR.mkdir(parents=True, exist_ok=True)
-            os.chmod(DIR, 0o700)
+            private(DIR)
             self.q = queue.Queue()
-            self.p = subprocess.Popen(["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WORKER_PS],
+            self.p = subprocess.Popen(ps_args(WORKER_PS, "-NonInteractive"),
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                      text=True, encoding="utf-8", errors="replace", bufsize=1,
-                                      start_new_session=True)
+                                      text=True, encoding="utf-8", errors="replace", bufsize=1, **detached())
             q, p = self.q, self.p
 
             def reader():
@@ -727,17 +1120,15 @@ class Runner:
     def event(self, kind, text):
         with self.lock:
             self.lines.append((kind, text))
-            if kind in ("H", "W", "E") and text.strip():
+            if kind in ("H", "W", "E") and text.strip() and not text.startswith("PUPPA-WHO|"):
                 self.tail = (self.tail + [text])[-3:]
                 m = self.DEVICE.search(text)
                 if m:
                     code = m.group(2)
-                    try:
-                        subprocess.run(["pbcopy"], input=code, text=True)
-                    except Exception:
-                        pass
-                    self.msg = f"Logga in på {m.group(1).split('//')[-1]} med koden {code} (kopierad)."
-        if not ANIM and kind == "H":
+                    copied = copy_text(code)
+                    self.msg = f"Logga in på {m.group(1).split('//')[-1]} med koden {code}" + \
+                        (" (kopierad)." if copied else ".")
+        if not ANIM and kind == "H" and not text.startswith("PUPPA-WHO|"):
             out("    " + dim(text))
 
     def frame_lines(self, mood, lift=0):
@@ -795,11 +1186,13 @@ def run_ps(title, code, secret=None, show_output=True, max_lines=None):
 
 
 HINTS = [
-    (r"AADSTS700016", "ClientId:t finns inte i den här tenanten. Fel tenant i profilen, eller så är appen inte registrerad där."),
+    (r"AADSTS700016", "ClientId:t finns inte i den här tenanten. Fel tenant, eller så är PnP-appen inte registrerad där."),
     (r"AADSTS65001|consent", "Appen saknar samtycke. En Global Admin måste godkänna den (Entra ID → Appregistreringar → API-behörigheter)."),
     (r"AADSTS50020|AADSTS50034", "Kontot finns inte i kundens tenant. Logga in med ett konto hos kunden."),
     (r"AADSTS7000215|AADSTS700027|certificate", "Certifikatet godtas inte. Kontrollera att rätt certifikat är uppladdat på appen."),
     (r"\(403\)|Forbidden|Access is denied|Åtkomst nekad", "Behörighet saknas. Kontot/appen har inte rätt roll eller rättighet för det här."),
+    (r"Request_ResourceNotFound|does not exist|couldn't find|Couldn't find object",
+     "Hittade inget med det namnet. Skriv en del av namnet så söker Puppa fram rätt objekt."),
     (r"is not recognized as (a|the) name of a cmdlet", "Ett kommando saknas – modulen är inte installerad eller så är du inte ansluten."),
 ]
 
@@ -816,7 +1209,10 @@ def print_output(lines, max_lines=None, quiet_host=False):
     global DIRTY
     DIRTY = True
     w = width()
+    # Graph-fel bär med sig datum, headrar och request-id – det ingen behöver läsa i terminalen
+    lines = [(k, re.split(r"\s+(?:Date|Headers)\s*:", t, 1)[0] if k == "E" else t) for k, t in lines]
     errs = [t for k, t in lines if k == "E"]
+    lines = [(k, t) for k, t in lines if not t.startswith("PUPPA-WHO|")]
     lines = [(k, t) for k, t in lines
              if not (k in ("H", "W") and any(e[:50] in t or t.replace("WARNING: ", "")[:50] in e for e in errs if e))]
     body = [t for k, t in lines if k == "O"]
@@ -888,107 +1284,277 @@ def show_command(code, title="Kommando som körs"):
 # ───────────────────────────── anslutningar ─────────────────────────────
 AUTHS = {"interactive": "Interaktiv (webbläsare)", "device": "Enhetskod (device login)",
          "certificate": "Certifikat (app-only)"}
+CONN_NAMES = {"pnp": "SharePoint (PnP)", "exo": "Exchange Online", "teams": "Teams", "graph": "Microsoft Graph"}
+WHO = "PUPPA-WHO|"
+# Efter inloggning: vem och vilken tenant? Puppa sparar svaret i tenant-listan.
+WHO_PS = {
+    "graph": "$c = Get-MgContext; $o = Get-MgOrganization -ErrorAction SilentlyContinue | Select-Object -First 1\n"
+             "Write-Host ('PUPPA-WHO|{0}|{1}|{2}|{3}' -f $c.TenantId, $c.Account, "
+             "(($o.VerifiedDomains | Where-Object IsInitial | Select-Object -First 1).Name), $o.DisplayName)",
+    "exo": "$ci = Get-ConnectionInformation | Select-Object -Last 1; $oc = Get-OrganizationConfig -ErrorAction SilentlyContinue\n"
+           "Write-Host ('PUPPA-WHO|{0}|{1}|{2}|{3}' -f $ci.TenantID, $ci.UserPrincipalName, $oc.Name, $oc.DisplayName)",
+    "teams": "Write-Host ('PUPPA-WHO|{0}|{1}|{2}|' -f $t.TenantId, \"$($t.Account)\", $t.TenantDomain)",
+}
 
 
-def pnp_connect_code(p, url):
-    base = f"Connect-PnPOnline -Url {psq(url)} -ClientId {psq(p['client_id'])} -Tenant {psq(p['tenant'])}"
-    a = p.get("auth", "interactive")
+def pnp_connect_code(t, url):
+    base = f"Connect-PnPOnline -Url {psq(url)} -ClientId {psq(t['client_id'])} -Tenant {psq(t['tenant'])}"
+    a = t.get("auth", "interactive")
     if a == "certificate":
-        return base + f" -CertificatePath {psq(p['cert_path'])} -CertificatePassword {SECRET_EXPR} -ErrorAction Stop"
+        return base + f" -CertificatePath {psq(t['cert_path'])} -CertificatePassword {SECRET_EXPR} -ErrorAction Stop"
     if a == "device":
         return base + " -DeviceLogin -PersistLogin -ErrorAction Stop"
     return base + " -Interactive -PersistLogin -ErrorAction Stop"
 
 
-def connect_code(kind, p, url=None, scopes=None):
-    dev = p.get("auth") == "device"
+def connect_code(kind, t, url=None, scopes=None):
+    """t = vald tenant eller None (då väljer du konto/tenant i inloggningsrutan)."""
+    dev = bool(t) and t.get("auth") == "device"
+    tid = (t.get("tenant_id") or t.get("tenant")) if t else ""
     if kind == "pnp":
-        return pnp_connect_code(p, url or p["admin_url"])
+        return pnp_connect_code(t, url or t["admin_url"])
     if kind == "exo":
         s = "Connect-ExchangeOnline -ShowBanner:$false"
-        if p.get("upn"):
-            s += f" -UserPrincipalName {psq(p['upn'])}"
-        if dev:
-            s += " -Device"
-        return s + " -ErrorAction Stop"
+        if t and t.get("upn"):
+            s += f" -UserPrincipalName {psq(t['upn'])}"
+        return s + (" -Device" if dev else "") + " -ErrorAction Stop"
     if kind == "teams":
-        s = f"Connect-MicrosoftTeams -TenantId {psq(p['tenant'])}" + (" -UseDeviceAuthentication" if dev else "")
-        return s + " -ErrorAction Stop | Out-Null"
+        s = "$t = Connect-MicrosoftTeams" + (f" -TenantId {psq(tid)}" if tid else "")
+        if t and t.get("upn"):
+            s += f" -AccountId {psq(t['upn'])}"
+        return s + (" -UseDeviceAuthentication" if dev else "") + " -ErrorAction Stop"
     if kind == "graph":
-        sc = ",".join(psq(x) for x in sorted(scopes or ["User.Read.All"]))
-        return f"Connect-MgGraph -TenantId {psq(p['tenant'])} -Scopes {sc} -NoWelcome" + \
+        sc = ",".join(psq(x) for x in sorted(set(scopes or []) | {"User.Read"}))
+        return "Connect-MgGraph" + (f" -TenantId {psq(tid)}" if tid else "") + f" -Scopes {sc} -NoWelcome" + \
                (" -UseDeviceCode" if dev else "") + " -ErrorAction Stop"
     raise ValueError(kind)
 
 
-CONN_NAMES = {"pnp": "SharePoint (PnP)", "exo": "Exchange Online", "teams": "Teams", "graph": "Microsoft Graph"}
-
-
-def need_secret(kind, p):
-    if kind == "pnp" and p.get("auth") == "certificate":
-        s = kc_get(p["name"])
+def need_secret(kind, t):
+    if kind == "pnp" and t.get("auth") == "certificate":
+        s = sec_get(t)
         if not s:
-            raise RuntimeError(f"Hittar inget certifikatlösenord för {p['name']} i Keychain (tjänst 'puppa').")
+            raise RuntimeError(f"Hittar inget certifikatlösenord för {t['name']} i valvet {VAULT}.")
         return s
     return None
 
 
-def is_connected(kind, p, url=None, scopes=None):
+def is_connected(kind, t, url=None, scopes=None):
     cur = WORKER.conn.get(kind)
-    if not cur or cur[0] != p["name"]:
+    if not cur or not t or cur[0] != t["name"]:
         return False
     if kind == "pnp":
-        return cur[1].rstrip("/").lower() == (url or p["admin_url"]).rstrip("/").lower()
+        return cur[1].rstrip("/").lower() == (url or t["admin_url"]).rstrip("/").lower()
     if kind == "graph":
         return set(scopes or []) <= set(cur[1])
     return True
 
 
-def ensure(kind, p, url=None, scopes=None, show=True):
-    """Anslut om det behövs. -> True om anslutet."""
-    if kind == "pnp" and not p.get("client_id"):
-        say(f"Profilen {p['name']} saknar ClientId. Fyll i det under Profiler eller kör guiden.", "sad")
-        return False
-    if is_connected(kind, p, url, scopes):
-        return True
-    if kind == "graph" and WORKER.conn.get("graph") and WORKER.conn["graph"][0] == p["name"]:
+def ensure(kind, t, url=None, scopes=None, show=True):
+    """Logga in om det behövs. -> tenanten (kan vara en ny, sparad efter inloggningen) eller None."""
+    if kind == "pnp":
+        t = pnp_ready(t)
+        if not t:
+            return None
+    if is_connected(kind, t, url, scopes):
+        return t
+    if kind == "graph" and t and WORKER.conn.get("graph") and WORKER.conn["graph"][0] == t["name"]:
         scopes = sorted(set(scopes or []) | set(WORKER.conn["graph"][1]))
-    code = connect_code(kind, p, url, scopes)
+    code = connect_code(kind, t, url, scopes)
     if show:
-        show_command(code, "Ansluter")
+        show_command(code, "Loggar in")
     if DRY:
-        return True
+        return t or {}
     try:
-        secret = need_secret(kind, p)
+        secret = need_secret(kind, t)
     except RuntimeError as e:
         say(str(e), "sad")
-        return False
-    ok, _, lines = run_ps(f"Ansluter till {CONN_NAMES[kind]} ({p['name']})", code, secret, show_output=False)
+        return None
+    full = code + ("\n" + WHO_PS[kind] if kind in WHO_PS else "")
+    title = f"Loggar in på {CONN_NAMES[kind]}" + (f" ({t['name']})" if t else " – välj konto i webbläsaren")
+    ok, _, lines = run_ps(title, full, secret, show_output=False)
     if not ok:
         print_output(lines, quiet_host=not ANIM)
-        say(f"Kunde inte ansluta till {CONN_NAMES[kind]}. Felet står ovanför.", "sad")
-        return False
-    WORKER.conn[kind] = (p["name"], url or p["admin_url"]) if kind == "pnp" else \
-        (p["name"], sorted(scopes or [])) if kind == "graph" else (p["name"],)
-    out("  " + green("✔") + f" Ansluten till {CONN_NAMES[kind]}" + dim(f" · {p['name']}"))
-    return True
+        say(f"Kunde inte logga in på {CONN_NAMES[kind]}. Felet står ovanför.", "sad")
+        return None
+    who = next((x[1][len(WHO):].split("|") for x in lines if x[0] == "H" and x[1].startswith(WHO)), None)
+    if who and any(who):
+        before = t["name"] if t else None
+        t, new = remember_login(who)
+        if before and before != t["name"]:
+            out("  " + yellow("!") + f" Du loggade in i {bold(t['name'])}, inte {before}. Bytte tenant.")
+        if new:
+            out("  " + green("✔") + f" Ny tenant i listan: {bold(t['name'])} " + dim(t.get("tenant", "")))
+    if not t:
+        return None
+    WORKER.conn[kind] = (t["name"], url or t["admin_url"]) if kind == "pnp" else \
+        (t["name"], sorted(scopes or [])) if kind == "graph" else (t["name"],)
+    out("  " + green("✔") + f" Inloggad på {CONN_NAMES[kind]}" + dim(f" · {t['name']}" +
+                                                                    (f" · {t['upn']}" if t.get("upn") else "")))
+    return t
 
 
 def conn_status():
-    p = active_profile()
+    t = active_tenant()
     w = width()
-    if not p:
-        return ["  " + dim("Ingen aktiv profil")]
-    head = f"  {dim('Profil')} {bold(p['name'])}"
-    if w >= 58:
-        head += dim(f"  {p['tenant']}  ·  {AUTHS.get(p.get('auth'), '?').split(' (')[0].lower()}")
-    if not p.get("client_id"):
-        head += "  " + yellow("saknar ClientId")
+    if not t:
+        head = f"  {dim('Tenant')} {dim('ingen vald – jag loggar in när ett recept behöver det')}"
+    else:
+        head = f"  {dim('Tenant')} {bold(t['name'])}"
+        if w >= 58:
+            head += dim(f"  {t.get('tenant', '')}")
+        if w >= 96 and t.get("upn"):
+            head += dim(f"  ·  {t['upn']}")
     parts = []
     for k, short in (("pnp", "PnP"), ("exo", "EXO"), ("teams", "Teams"), ("graph", "Graph")):
-        on = WORKER.conn.get(k, ("",))[0] == p["name"]
+        on = bool(t) and WORKER.conn.get(k, ("",))[0] == t["name"]
         parts.append((green("● ") if on else dim("○ ")) + (short if on else dim(short)))
     return [head, "  " + "  ".join(parts)]
+
+
+# ───────────────────────────── uppslag (sök i tenanten) ─────────────────────────────
+# I ett recept: param: Anvandare | Användare | | @user      (@typ+ = flera värden, kommaseparerade)
+# Varje uppslag skriver "PUPPA-PICK|värde|namn|detalj" per träff. $Q är det du skrev.
+PICK = "PUPPA-PICK|"
+LOOKUPS = {
+    "user": ("graph:User.Read.All", "användare", r"""
+$s = $Q -replace '"', ''
+$p = @{ Top = 40; Property = 'displayName,userPrincipalName,accountEnabled,userType'; ConsistencyLevel = 'eventual' }
+if ($s) { $p.Search = ('"displayName:{0}" OR "userPrincipalName:{0}" OR "mail:{0}"' -f $s) }
+Get-MgUser @p | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{1}|{2}' -f $_.UserPrincipalName, $_.DisplayName,
+    ($_.UserPrincipalName + $(if ($_.UserType -eq 'Guest') { ' · gäst' }) + $(if (-not $_.AccountEnabled) { ' · avstängd' }))) }
+"""),
+    "group": ("graph:Group.Read.All", "grupper", r"""
+$s = $Q -replace '"', ''
+$p = @{ Top = 40; Property = 'displayName,mail,groupTypes,securityEnabled'; ConsistencyLevel = 'eventual' }
+if ($s) { $p.Search = ('"displayName:{0}" OR "mail:{0}"' -f $s) }
+Get-MgGroup @p | ForEach-Object {
+    $typ = if ($_.GroupTypes -contains 'Unified') { 'Microsoft 365' } elseif ($_.SecurityEnabled) { 'säkerhet' } else { 'distribution' }
+    Write-Host ('PUPPA-PICK|{0}|{1}|{2}' -f $(if ($_.Mail) { $_.Mail } else { $_.DisplayName }), $_.DisplayName, "$($_.Mail) · $typ") }
+"""),
+    "sku": ("graph:Organization.Read.All", "licenser", r"""
+Get-MgSubscribedSku -All | Where-Object { $_.PrepaidUnits.Enabled -gt 0 } | ForEach-Object {
+    Write-Host ('PUPPA-PICK|{0}|{0}|{1} av {2} använda' -f $_.SkuPartNumber, $_.ConsumedUnits, $_.PrepaidUnits.Enabled) }
+"""),
+    "mailbox": ("exo", "postlådor", r"""
+$t = 'UserMailbox','SharedMailbox','RoomMailbox','EquipmentMailbox'
+$r = if ($Q) { Get-EXORecipient -Anr $Q -RecipientTypeDetails $t -ResultSize 40 } else { Get-EXORecipient -RecipientTypeDetails $t -ResultSize 40 }
+$r | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{1}|{0} · {2}' -f $_.PrimarySmtpAddress, $_.DisplayName, $_.RecipientTypeDetails) }
+"""),
+    "recipient": ("exo", "mottagare", r"""
+$r = if ($Q) { Get-EXORecipient -Anr $Q -ResultSize 40 } else { Get-EXORecipient -ResultSize 40 }
+$r | Where-Object PrimarySmtpAddress | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{1}|{0} · {2}' -f $_.PrimarySmtpAddress, $_.DisplayName, $_.RecipientTypeDetails) }
+"""),
+    "dl": ("exo", "distributionslistor", r"""
+$t = 'MailUniversalDistributionGroup','MailUniversalSecurityGroup','RoomList'
+$r = if ($Q) { Get-EXORecipient -Anr $Q -RecipientTypeDetails $t -ResultSize 40 } else { Get-EXORecipient -RecipientTypeDetails $t -ResultSize 40 }
+$r | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{1}|{0} · {2}' -f $_.PrimarySmtpAddress, $_.DisplayName, $_.RecipientTypeDetails) }
+"""),
+    "site": ("pnp:admin", "sajter", r"""
+Get-PnPTenantSite | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{1}|{0}' -f $_.Url, $(if ($_.Title) { $_.Title } else { $_.Url })) }
+"""),
+    "spuser": ("pnp:admin", "användare", r"""
+$s = $Q -replace "'", "''"
+$f = if ($s) { "startswith(displayName,'$s') or startswith(userPrincipalName,'$s') or startswith(mail,'$s') or startswith(surname,'$s')" } else { $null }
+$p = @{ EndIndex = 40 }; if ($f) { $p.Filter = $f }
+Get-PnPEntraIDUser @p | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{1}|{0}' -f $_.UserPrincipalName, $_.DisplayName) }
+"""),
+    "team": ("teams", "team", r"""
+Get-Team | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{0}|{1}' -f $_.DisplayName, "$($_.Visibility)$(if ($_.Archived) { ' · arkiverat' })") }
+"""),
+}
+LIST_ALL = {"site", "team", "sku"}          # hämtas en gång per session och filtreras här i Puppa
+LOOKUP_CACHE = {}
+
+
+def need_for(spec):
+    """'graph:User.Read.All' -> ('graph', None, ['User.Read.All']) · 'pnp:admin' -> ('pnp', admin_url-markör, None)"""
+    kind, _, arg = spec.partition(":")
+    if kind == "graph":
+        return kind, None, [s for s in arg.split(",") if s]
+    return kind, None, None
+
+
+def run_lookup(kind, t, query):
+    """-> (t, [(värde, namn, detalj)]) eller (t, None) om uppslaget inte gick."""
+    spec, _, code = LOOKUPS[kind]
+    ck, _, scopes = need_for(spec)
+    t2 = ensure(ck, t, None, scopes, show=False)
+    if not t2:
+        return t, None
+    t = t2
+    cache_key = (kind, t["name"])
+    if kind in LIST_ALL and cache_key in LOOKUP_CACHE:
+        items = LOOKUP_CACHE[cache_key]
+    else:
+        q = "" if kind in LIST_ALL else query
+        ok, _, lines = run_ps(f"Söker {LOOKUPS[kind][1]}" + (f" ”{query}”" if q else ""),
+                              f"$Q = {psq(q)}\n{code}", show_output=False)
+        items = []
+        for k, txt in lines:
+            if k == "H" and txt.startswith(PICK):
+                f = (txt[len(PICK):].split("|") + ["", "", ""])[:3]
+                if f[0]:
+                    items.append(tuple(f))
+        if not ok and not items:
+            print_output(lines, quiet_host=True)
+            return t, None
+        if kind in LIST_ALL:
+            LOOKUP_CACHE[cache_key] = items
+    ranked = fuzzy_rank(query, items, lambda x: f"{x[1]} {x[0]} {x[2]}") if query else items
+    return t, ranked
+
+
+def lookup_param(prm, t, default):
+    """Fråga efter en del av namnet, sök i tenanten och låt användaren välja. -> (t, värde)"""
+    kind = prm.lookup.rstrip("+")
+    many = prm.lookup.endswith("+")
+    chosen = []
+    q_default = "" if kind == "site" else default        # sajt: sök på namn, inte på en halv URL
+    while True:
+        what = prm.question + (" – fler: lägg till en i taget" if many and chosen else "")
+        q = ask_text(what + (" (valfritt)" if prm.optional else "") + " · skriv en del av namnet",
+                     q_default, required=not prm.optional and not chosen)
+        q_default = ""
+        if not q:
+            break
+        if "@" in q and " " not in q and kind not in ("site", "team", "sku"):
+            v = q                                            # fullständig adress: använd direkt
+        else:
+            t, hits = run_lookup(kind, t, q)
+            if hits is None:
+                out("    " + yellow(f"Kunde inte söka – använder ”{q}” som det är."))
+                v = q
+            else:
+                exact = [h for h in hits if h[0].lower() == q.lower() or h[1].lower() == q.lower()]
+                if len(exact) == 1 or len(hits) == 1:
+                    h = (exact or hits)[0]
+                    v = h[0]
+                    out("    " + green("→ ") + bold(h[1]) + dim(f"  {h[0]}" if h[0] != h[1] else ""))
+                elif not hits:
+                    out("    " + yellow(f"Hittade inga {LOOKUPS[kind][1]} som matchar ”{q}”."))
+                    v = choose([dict(label="Sök igen", value="__again"),
+                                dict(label=f"Använd ”{q}” som det är", value=q)], title="Vad vill du göra?")
+                    if v is None:
+                        raise Cancel()
+                    if v == "__again":
+                        continue
+                else:
+                    rows = [dict(label=h[1], hint=h[2] or h[0], value=h[0]) for h in hits[:200]]
+                    rows += [("head", ""), dict(label="Sök igen…", value="__again", key="s"),
+                             dict(label=f"Använd ”{q}” som det är", value="__raw", key="r")]
+                    v = choose(rows, title=f"{len(hits)} {LOOKUPS[kind][1]} matchar ”{q}”" +
+                               (" – skriv för att filtrera" if len(hits) > 9 else ""))
+                    if v is None:
+                        raise Cancel()
+                    if v == "__again":
+                        continue
+                    if v == "__raw":
+                        v = q
+        chosen.append(v)
+        if not many or not confirm("Lägg till fler?", False):
+            break
+    return t, ",".join(chosen)
 
 
 # ───────────────────────────── recept ─────────────────────────────
@@ -1002,7 +1568,13 @@ class Param:
             raise ValueError(f"ogiltigt parameternamn '{self.name}' (bara bokstäver a–z, siffror, _)")
         self.question = f[1] if len(f) > 1 and f[1] else self.name
         self.default = f[2] if len(f) > 2 else ""
-        self.choices = [x.strip() for x in f[3].split(",") if x.strip()] if len(f) > 3 and f[3] else []
+        spec = f[3] if len(f) > 3 else ""
+        self.lookup = spec.strip() if spec.strip().startswith("@") else ""
+        if self.lookup:
+            self.lookup = self.lookup[1:]
+            if self.lookup.rstrip("+") not in LOOKUPS:
+                raise ValueError(f"okänt uppslag '@{self.lookup}' (finns: {', '.join('@' + k for k in LOOKUPS)})")
+        self.choices = [] if self.lookup else [x.strip() for x in spec.split(",") if x.strip()]
 
 
 class Recipe:
@@ -1083,11 +1655,11 @@ def find_recipe(name, rs=None):
     return hits[0] if len(hits) == 1 else None
 
 
-def placeholders(p):
-    if not p:
-        return {}
-    return {"tenant": p.get("tenant", ""), "prefix": p.get("prefix", ""), "adminUrl": p.get("admin_url", ""),
-            "rootUrl": p.get("root_url", ""), "upn": p.get("upn", ""), "profil": p.get("name", ""),
+def placeholders(t):
+    t = t or {}
+    name = t.get("name") or "puppa"
+    return {"tenant": t.get("tenant", ""), "prefix": t.get("prefix", ""), "adminUrl": t.get("admin_url", ""),
+            "rootUrl": t.get("root_url", ""), "upn": t.get("upn", ""), "kund": name, "profil": name,
             "datum": datetime.now().strftime("%Y-%m-%d")}
 
 
@@ -1096,6 +1668,7 @@ def fill(s, ph):
 
 
 def collect_params(r, p, given):
+    """-> (värden, tenant). Uppslag (@user, @group …) kan logga in och därmed sätta tenanten."""
     ph = placeholders(p)
     vals = {}
     for prm in r.params:
@@ -1108,6 +1681,10 @@ def collect_params(r, p, given):
                 raise Cancel(f"saknar {prm.name}=…")
             vals[prm.name] = default
             continue
+        if prm.lookup and not DRY:
+            p, v = lookup_param(prm, p, default)
+            vals[prm.name] = v
+            continue
         if prm.choices:
             rows = [dict(label=ch, value=ch) for ch in prm.choices]
             v = choose(rows, title=prm.question, start=default or None)
@@ -1117,7 +1694,7 @@ def collect_params(r, p, given):
             v = ask_text(prm.question + ("" if not prm.optional else " (valfritt)"), default,
                          required=not prm.optional)
         vals[prm.name] = v
-    return vals
+    return vals, p
 
 
 def build_script(r, vals, p=None):
@@ -1126,51 +1703,54 @@ def build_script(r, vals, p=None):
 
 
 def run_recipe(r, given=None, yes=False):
-    p = active_profile()
+    t = active_tenant()
     needs = r.needs_list()
-    if needs and not p:
-        say("Det här receptet behöver en kundprofil. Skapa en först – det går fort.", "worry")
-        if ITTY and confirm("Starta guiden för ny PnP-profil?", True):
-            guide()
-        return False
     w = width()
-    out(f"  {accent('▍')}{bold(r.name)}  {r.badge()}" + (dim(f"  {p['name']}") if p and needs else ""))
+    out(f"  {accent('▍')}{bold(r.name)}  {r.badge()}" + (dim(f"  {t['name']}") if t and needs else ""))
     for l in wrap(r.desc, w - 6, 3) if r.desc else []:
         out("    " + dim(l))
     print()
+    if any(k == "pnp" for k, _ in needs):
+        t = pnp_ready(t)
+        if not t:
+            return False
     try:
-        vals = collect_params(r, p, given or {})
+        vals, t = collect_params(r, t, given or {})
     except Cancel as e:
         if e.args:
             out(red("  " + e.args[0]))
         out(dim("  Avbrutet."))
         return False
-    script = build_script(r, vals, p)
-    print()
     pre = []
     for kind, arg in needs:
-        url = None
-        scopes = None
+        url = scopes = None
         if kind == "pnp":
-            url = p["admin_url"] if arg == "admin" else p["root_url"] if arg == "root" else vals.get(arg, arg)
+            url = t["admin_url"] if arg == "admin" else t["root_url"] if arg == "root" else vals.get(arg, arg)
         if kind == "graph":
             scopes = [s.strip() for s in arg.split(",") if s.strip()]
         pre.append((kind, url, scopes))
-        if not is_connected(kind, p, url, scopes):
-            show_command(connect_code(kind, p, url, scopes) if (kind != "pnp" or p.get("client_id")) else
-                         "# profilen saknar ClientId – fyll i under Profiler", "Först: anslut")
-    show_command(script)
+    print()
     if DRY:
+        for kind, url, scopes in pre:
+            if not is_connected(kind, t, url, scopes):
+                show_command(connect_code(kind, t, url, scopes), "Först: logga in")
+        show_command(build_script(r, vals, t))
         say("Torrkörning: inget kördes. Så här skulle det se ut.", "happy")
         return True
+    # Logga in först (det ändrar inget) – då vet vi vilken tenant ändringen hamnar i innan du bekräftar.
+    for kind, url, scopes in pre:
+        t2 = ensure(kind, t, url, scopes)
+        if not t2:
+            return False
+        t = t2
+    script = build_script(r, vals, t)
+    show_command(script)
     if r.writes and not yes:
         print()
-        say(f"Det här ändrar i {p['tenant'] if p else 'tenanten'}. Kolla kommandot ovan först.", "worry")
+        say(f"Det här ändrar i {t['name']} ({t.get('tenant', '')}). Kolla kommandot ovan först." if t else
+            "Det här ändrar något. Kolla kommandot ovan först.", "worry")
         if not confirm("Kör på riktigt?", False):
             say("Okej, inget ändrat.", "happy")
-            return False
-    for kind, url, scopes in pre:
-        if not ensure(kind, p, url, scopes, show=False):
             return False
     ok, n, _ = run_ps(f"Kör {r.name}", script)
     print()
@@ -1197,7 +1777,7 @@ param:       Namn | Vad ska Puppa fråga om? | standardvärde
 param:       Valfri? | Ett valfritt värde (tomt går bra) |
 #>
 # Parametrarna finns som variabler: $Namn, $Valfri.
-# Platshållare i standardvärden: {{tenant}} {{prefix}} {{adminUrl}} {{rootUrl}} {{upn}} {{profil}} {{datum}}
+# Platshållare i standardvärden och skript: {{tenant}} {{prefix}} {{adminUrl}} {{rootUrl}} {{upn}} {{kund}} {{datum}}
 # Returnera objekt (Select-Object …) så kan resultatet exporteras till Excel efteråt.
 Write-Host "Hej $Namn"
 """
@@ -1208,7 +1788,8 @@ def new_recipe():
     say("Ett recept är en vanlig .ps1 med ett litet huvud överst. Jag skapar en mall åt dig.", "happy")
     try:
         name = ask_text("Vad ska receptet heta?", required=True)
-        cat = choose([dict(label=x, value=x) for x in ["SharePoint", "Exchange", "Teams", "Graph", "Excel", "Lokalt"]],
+        cat = choose([dict(label=x, value=x) for x in ["SharePoint", "OneDrive", "Exchange", "Grupper", "Användare",
+                                                      "Teams", "Excel", "Lokalt"]],
                      title="Kategori")
         if cat is None:
             raise Cancel()
@@ -1233,12 +1814,10 @@ def new_recipe():
     f.write_text(RECIPE_TEMPLATE.format(name=name, cat=cat, kind=kind, needs=needs), encoding="utf-8")
     say(f"Mallen ligger i {f}. Redigera den, så dyker receptet upp i menyn direkt.", "proud")
     if confirm("Öppna i editorn?", True):
-        ed = shutil.which("code") or None
-        subprocess.run([ed, str(f)] if ed else ["open", "-t", str(f)])
+        open_file(f)
 
 
-# ───────────────────────────── profiler & guide ─────────────────────────────
-GUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+# ───────────────────────────── tenants & PnP-appregistrering ─────────────────────────────
 PERMS = {
     "read": ("Bara läsa", "Sites.Read.All · Group.Read.All · User.Read.All",
              "-SharePointApplicationPermissions Sites.Read.All -GraphApplicationPermissions Group.Read.All,User.Read.All"),
@@ -1248,23 +1827,77 @@ PERMS = {
 }
 
 
-def tenant_info(t):
-    t = t.strip().lower()
-    t = re.sub(r"^https?://", "", t).split("/")[0]
-    if t.endswith(".sharepoint.com"):
-        pre = t.split(".")[0].replace("-admin", "")
-        return pre + ".onmicrosoft.com", pre
-    if "." not in t:
-        return t + ".onmicrosoft.com", t
-    if t.endswith(".onmicrosoft.com"):
-        return t, t.split(".")[0]
-    return t, ""
-
-
 def check_tenant(v):
     if " " in v.strip():
         return "Inga mellanslag. T.ex. contoso, contoso.onmicrosoft.com eller contoso.se."
     return None
+
+
+def ago(iso):
+    try:
+        s = (datetime.now() - datetime.fromisoformat(iso)).total_seconds()
+    except Exception:
+        return ""
+    if s < 3600:
+        return "nyss"
+    if s < 86400:
+        return f"{int(s // 3600)} h sedan"
+    return f"{int(s // 86400)} d sedan"
+
+
+def tenant_rows():
+    act = config().get("active")
+    w = width()
+    ts = sorted(tenants(), key=lambda t: t.get("last") or t.get("created") or "", reverse=True)
+    rows = []
+    for t in ts:
+        hint = t.get("tenant", "")
+        if w >= 96 and t.get("upn"):
+            hint += "  · " + t["upn"]
+        if w >= 120 and t.get("last"):
+            hint += "  · " + ago(t["last"])
+        badge = green("aktiv") if t["name"] == act else (cyan("PnP") if t.get("client_id") else "")
+        rows.append(dict(label=t["name"], hint=hint, value=t["name"], badge=badge))
+    return rows
+
+
+def add_tenant():
+    """Lägg till en tenant för hand (oftast behövs det inte – inloggning sparar tenanten automatiskt)."""
+    traw = ask_text("Tenantens domän? (contoso, contoso.onmicrosoft.com eller contoso.se)", required=True,
+                    check=check_tenant)
+    domain, prefix = tenant_info(traw)
+    ts = tenants()
+    if any(x.get("tenant", "").lower() == domain for x in ts):
+        say(f"{domain} finns redan i listan.", "happy")
+        t = next(x for x in ts if x.get("tenant", "").lower() == domain)
+        set_config(active=t["name"])
+        return t
+    base = (prefix or domain.split(".")[0]).capitalize()
+    name = ask_text("Vad ska den heta i listan?", unique_name(base, ts))
+    upn = ask_text("Ditt admin-konto där? (valfritt, föreslås vid inloggning)", "")
+    t = dict(name=unique_name(name, ts), tenant=domain, tenant_id="", upn=upn, client_id="", auth="interactive",
+             created=datetime.now().isoformat(timespec="seconds"))
+    t.update(sp_fields(prefix))
+    ts.append(t)
+    save_tenants(ts)
+    use_tenant(t, quiet=True)
+    say(f"{t['name']} är tillagd och vald.", "proud")
+    return t
+
+
+def pnp_ready(t):
+    """SharePoint-recept går via PnP PowerShell, som kräver en Entra ID-app i tenanten. Saknas den: erbjud registrering."""
+    if t and t.get("client_id") and t.get("admin_url"):
+        return t
+    if not ITTY:
+        say("SharePoint-recept behöver en PnP-app för tenanten. Kör: puppa pnp", "worry")
+        return None
+    where = f"i {t['name']}" if t else "i tenanten"
+    say(f"SharePoint-recept går via PnP PowerShell, som behöver en egen app-registrering {where}. "
+        "Den gör vi en gång per tenant.", "worry")
+    if not confirm("Gör en ny PnP-appregistrering nu?", True):
+        return None
+    return pnp_setup(t, intro=False)
 
 
 def register_code(app, tenant, auth, perm, outdir):
@@ -1287,102 +1920,104 @@ $h | ConvertTo-Json | Set-Content -LiteralPath $env:PUPPA_OUT -Encoding utf8
 """
 
 
-def guide():
-    """Ny PnP-profil: kund → tenant → URL:er → inloggningssätt → app (registrera / befintlig / senare) → spara."""
+def pnp_setup(t=None, intro=True):
+    """Ny PnP-appregistrering för en tenant: tenant → SharePoint-adress → inloggningssätt → app → klart."""
     print()
-    say("Vi sätter upp PnP för en kund. Jag frågar, du svarar, och inget skapas i tenanten utan att du säger ja.",
-        "happy", sub="Ctrl+C avbryter när som helst")
+    if intro:
+        say("Ny PnP-appregistrering. Jag frågar, du svarar – och inget skapas i tenanten utan att du säger ja.",
+            "happy", sub="Ctrl+C avbryter när som helst")
     try:
-        names = {p["name"].lower() for p in profiles()}
-        name = ask_text("Vad heter kunden? (profilnamn)", required=True,
-                        check=lambda v: "Det namnet finns redan." if v.lower() in names else None)
-        traw = ask_text("Kundens tenant? (contoso, contoso.onmicrosoft.com eller domän)", required=True,
-                        check=check_tenant)
-        tenant, prefix = tenant_info(traw)
-        if not prefix:
-            prefix = ask_text("SharePoint-namnet? (det som står före .sharepoint.com)", required=True,
-                              check=check_tenant)
-            prefix = prefix.lower().replace(".sharepoint.com", "").replace("-admin", "")
-        admin_url = ask_text("Admin-URL", f"https://{prefix}-admin.sharepoint.com")
-        root_url = f"https://{prefix}.sharepoint.com"
+        if not t:
+            ts = tenants()
+            if ts:
+                v = choose(tenant_rows() + [("head", ""), dict(label="En annan tenant…", value="__new", key="n")],
+                           title="Vilken tenant?")
+                if v is None:
+                    raise Cancel()
+                t = add_tenant() if v == "__new" else find_tenant(v)
+            else:
+                t = add_tenant()
+        t = dict(t)
+        if not t.get("prefix"):
+            dom, pre = tenant_info(t.get("tenant", ""))
+            if not pre:
+                pre = ask_text("SharePoint-namnet? (det som står före .sharepoint.com)", required=True,
+                               check=check_tenant)
+                pre = pre.lower().replace(".sharepoint.com", "").replace("-admin", "").replace("https://", "")
+            t.update(sp_fields(pre))
+        t["admin_url"] = ask_text("SharePoint-admin-URL", t["admin_url"]).rstrip("/")
         auth = choose([dict(label=AUTHS["interactive"], hint="du loggar in, delegerade rättigheter", value="interactive"),
                        dict(label=AUTHS["device"], hint="kod i webbläsaren, bra över SSH", value="device"),
-                       dict(label=AUTHS["certificate"], hint="obevakat, certifikat i Keychain", value="certificate")],
-                      title="Hur ska du logga in?")
+                       dict(label=AUTHS["certificate"], hint="obevakat, certifikat + lösenord i valvet", value="certificate")],
+                      title="Hur ska PnP logga in?")
         if auth is None:
             raise Cancel()
+        t["auth"] = auth
         how = choose([dict(label="Registrera en ny app åt mig", hint="Register-PnPEntraID… (frågar först)", value="new"),
-                      dict(label="Kunden har redan en app", hint="jag klistrar in ClientId", value="have"),
-                      dict(label="Fyll i senare", hint="spara profilen utan ClientId", value="later")],
-                     title="PnP kräver en egen Entra ID-app per tenant")
+                      dict(label="Det finns redan en app", hint="jag klistrar in ClientId", value="have")],
+                     title=f"PnP-app i {t['name']}")
         if how is None:
             raise Cancel()
-        prof = dict(name=name, tenant=tenant, prefix=prefix, admin_url=admin_url.rstrip("/"), root_url=root_url,
-                    auth=auth, client_id="", upn="", created=datetime.now().isoformat(timespec="seconds"))
         if how == "have":
-            prof["client_id"] = ask_text("ClientId (Application ID, en GUID)", required=True,
-                                         check=lambda v: None if GUID.match(v) else "Det ser inte ut som en GUID.")
-            if auth == "certificate":
-                if not import_cert(prof):
-                    raise Cancel()
-        elif how == "new":
-            if not register_app(prof):
-                if not confirm("Spara profilen ändå (utan ClientId)?", True):
-                    raise Cancel()
-        prof["upn"] = ask_text("Ditt admin-konto hos kunden? (för Exchange, valfritt)", "")
+            t["client_id"] = ask_text("ClientId (Application ID, en GUID)", required=True,
+                                      check=lambda v: None if GUID.match(v) else "Det ser inte ut som en GUID.")
+            if auth == "certificate" and not import_cert(t):
+                raise Cancel()
+        elif not register_app(t):
+            return None
     except Cancel:
         out(dim("  Avbrutet. Inget sparat."))
         return None
-    ps = profiles()
-    ps.append(prof)
-    save_profiles(ps)
-    set_config(active=prof["name"])
-    WORKER.restart() if WORKER.conn else None
+    ts = [x for x in tenants() if x["name"] != t["name"]] + [t]
+    save_tenants(ts)
+    use_tenant(t, quiet=True)
     print()
-    celebrate(f"Profilen {prof['name']} är sparad och aktiv!")
-    print_profile(prof)
-    if prof["client_id"] and confirm("Testa anslutningen nu?", True):
-        test_profile(prof)
-    return prof
+    celebrate(f"PnP är klart för {t['name']}!")
+    print_tenant(t)
+    if confirm("Testa anslutningen nu?", True):
+        test_pnp(t)
+    return t
 
 
-def import_cert(prof):
+def import_cert(t):
     path = ask_text("Sökväg till .pfx-filen", required=True,
-                    check=lambda v: None if Path(os.path.expanduser(v)).is_file() else "Hittar ingen fil där.")
-    pw = ask_text("Lösenordet till .pfx-filen (syns inte, sparas i Keychain)", secret=True)
+                    check=lambda v: None if Path(os.path.expanduser(v.strip('"'))).is_file() else "Hittar ingen fil där.")
+    pw = ask_text("Lösenordet till .pfx-filen (syns inte, sparas i valvet)", secret=True)
     CERTS.mkdir(parents=True, exist_ok=True)
-    os.chmod(CERTS, 0o700)
-    dst = CERTS / (slug(prof["name"]) + ".pfx")
-    shutil.copyfile(os.path.expanduser(path), dst)
-    os.chmod(dst, 0o600)
-    if not kc_set(prof["name"], pw):
-        say("Kunde inte spara lösenordet i Keychain.", "sad")
+    private(CERTS)
+    dst = CERTS / (slug(t["name"]) + ".pfx")
+    shutil.copyfile(os.path.expanduser(path.strip('"')), dst)
+    private(dst)
+    if not sec_set(t, pw):
+        say("Kunde inte spara lösenordet i valvet.", "sad")
         return False
-    prof["cert_path"] = str(dst)
-    out("  " + green("✔") + f" Certifikatet kopierat till {dst} · lösenordet i Keychain")
+    t["cert_path"] = str(dst)
+    out("  " + green("✔") + f" Certifikatet kopierat till {dst} · lösenordet i valvet {VAULT}")
     return True
 
 
-def register_app(prof):
-    app = ask_text("Appens namn i Entra ID", f"PnP PowerShell ({prof['name']})")
+def register_app(t):
+    app = ask_text("Appens namn i Entra ID", f"PnP PowerShell ({t['name']})")
     perm = "read"
-    if prof["auth"] == "certificate":
+    if t["auth"] == "certificate":
         perm = choose([dict(label=v[0], hint=v[1], value=k) for k, v in PERMS.items()], title="Rättigheter för appen")
         if perm is None:
             raise Cancel()
-    outdir = CERTS / ("ny-" + slug(prof["name"]))
-    code = register_code(app, prof["tenant"], prof["auth"], perm, outdir)
+    outdir = CERTS / ("ny-" + slug(t["name"]))
+    code = register_code(app, t["tenant"], t["auth"], perm, outdir)
     print()
     show_command(code, "Registrerar app")
-    say(f"Det här skapar en app-registrering i {prof['tenant']} och kräver en admin som godkänner (samtycke). "
+    say(f"Det här skapar en app-registrering i {t['tenant']} och kräver en admin som godkänner (samtycke). "
         "Ett webbläsarfönster öppnas.", "worry")
-    if DRY or not confirm(f"Registrera appen i {prof['tenant']} på riktigt?", False):
-        say("Torrkörning: ingen app skapad. Du kan köra kommandot själv och fylla i ClientId under Profiler.", "happy")
+    if DRY or not confirm(f"Registrera appen i {t['tenant']} på riktigt?", False):
+        say("Ingen app skapad. Du kan köra kommandot själv och sedan välja 'Det finns redan en app'.", "happy")
         return False
-    secret = secrets.token_urlsafe(24) if prof["auth"] == "certificate" else None
+    secret = secrets.token_urlsafe(24) if t["auth"] == "certificate" else None
     if secret:
+        if not store_ready():
+            return False
         CERTS.mkdir(parents=True, exist_ok=True)
-        os.chmod(CERTS, 0o700)
+        private(CERTS)
         outdir.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="puppa-", suffix=".json")
     os.close(fd)
@@ -1390,41 +2025,44 @@ def register_app(prof):
     if secret:
         env["PUPPA_SECRET"] = secret
     out(dim("  Lämnar över till PowerShell. Följ instruktionerna där…"))
-    rc = subprocess.call(["pwsh", "-NoLogo", "-NoProfile", "-Command", REG_WRAP.format(cmd=code)], env=env)
+    rc = subprocess.call(ps_args(REG_WRAP.format(cmd=code)), env=env)
     data = load_json(tmp, {})
     os.unlink(tmp)
     cid = next((v for k, v in data.items() if re.search(r"clientid|appid", k, re.I) and GUID.match(str(v))), "")
     if rc != 0 or not cid:
         say("Registreringen gick inte igenom (eller så hittade jag inget ClientId).", "sad")
         return False
-    prof["client_id"] = cid
+    t["client_id"] = cid
     if secret:
         pfx = next(iter(outdir.glob("*.pfx")), None)
         if not pfx:
             say("Appen skapades men jag hittar ingen .pfx-fil.", "sad")
             return False
-        dst = CERTS / (slug(prof["name"]) + ".pfx")
+        dst = CERTS / (slug(t["name"]) + ".pfx")
         shutil.move(str(pfx), dst)
-        os.chmod(dst, 0o600)
+        private(dst)
         for f in outdir.glob("*.cer"):
-            shutil.move(str(f), CERTS / (slug(prof["name"]) + ".cer"))
+            shutil.move(str(f), CERTS / (slug(t["name"]) + ".cer"))
         shutil.rmtree(outdir, ignore_errors=True)
-        if not kc_set(prof["name"], secret):
-            say("Kunde inte spara certifikatlösenordet i Keychain.", "sad")
+        if not sec_set(t, secret):
+            say("Kunde inte spara certifikatlösenordet i valvet.", "sad")
             return False
-        prof["cert_path"] = str(dst)
+        t["cert_path"] = str(dst)
     out("  " + green("✔") + f" App registrerad · ClientId {cid}")
     return True
 
 
-def print_profile(p):
+def print_tenant(t):
     w = width()
-    rows = [("Tenant", p["tenant"]), ("Admin-URL", p["admin_url"]), ("Rot-URL", p["root_url"]),
-            ("Inloggning", AUTHS.get(p.get("auth"), "?")), ("ClientId", p.get("client_id") or yellow("saknas")),
-            ("Exchange-konto", p.get("upn") or dim("–"))]
-    if p.get("auth") == "certificate":
-        rows.append(("Certifikat", (p.get("cert_path") or "–") + dim("  · lösenord i Keychain")))
-    kw = 15 if w >= 58 else 0
+    rows = [("Domän", t.get("tenant") or "–"), ("Tenant-ID", t.get("tenant_id") or dim("–")),
+            ("Konto", t.get("upn") or dim("–")),
+            ("SharePoint", t.get("admin_url") or dim("inte uppsatt")),
+            ("PnP-app", t.get("client_id") or dim("ingen – behövs bara för SharePoint-recept"))]
+    if t.get("client_id"):
+        rows.append(("PnP-inloggning", AUTHS.get(t.get("auth"), "?")))
+    if t.get("auth") == "certificate" and t.get("cert_path"):
+        rows.append(("Certifikat", t["cert_path"] + dim(f"  · lösenord i valvet {VAULT}")))
+    kw = 16 if w >= 58 else 0
     for k, v in rows:
         if kw:
             out("    " + dim(pad(k, kw)) + v)
@@ -1433,104 +2071,96 @@ def print_profile(p):
             out("      " + v)
 
 
-def profile_rows():
-    act = config().get("active")
-    rows = []
-    w = width()
-    for p in profiles():
-        hint = p["tenant"] + ("  · " + AUTHS.get(p.get("auth"), "").split(" (")[0].lower() if w >= 90 else "")
-        badge = green("aktiv") if p["name"] == act else (yellow("ofullst.") if not p.get("client_id") else "")
-        rows.append(dict(label=p["name"], hint=hint, value=p["name"], badge=badge))
-    return rows
-
-
-def use_profile(p, quiet=False):
-    if config().get("active") != p["name"]:
-        set_config(active=p["name"])
+def use_tenant(t, quiet=False):
+    t = dict(t)
+    t["last"] = datetime.now().isoformat(timespec="seconds")
+    update_tenant(t["name"], last=t["last"])
+    if config().get("active") != t["name"]:
+        set_config(active=t["name"])
         if WORKER.conn:
             WORKER.stop()
             WORKER.warm()
     if not quiet:
-        say(f"Nu jobbar vi i {p['name']} ({p['tenant']}).", "proud")
+        say(f"Nu jobbar vi i {t['name']} ({t.get('tenant', '')}).", "proud")
 
 
-def test_profile(p):
+def test_pnp(t):
     print()
-    if not p.get("client_id"):
-        say(f"{p['name']} saknar ClientId, så det finns inget att testa än.", "sad")
+    if not t.get("client_id"):
+        say(f"{t['name']} har ingen PnP-app än, så det finns inget att testa.", "sad")
         return False
-    if config().get("active") != p["name"]:
-        use_profile(p, quiet=True)
-    code = connect_code("pnp", p, p["admin_url"]) + "\n" + \
+    if config().get("active") != t["name"]:
+        use_tenant(t, quiet=True)
+    code = connect_code("pnp", t, t["admin_url"]) + "\n" + \
         "$c = Get-PnPConnection\n[pscustomobject]@{ Url = $c.Url; Typ = \"$($c.ConnectionType)\"; " \
         "ClientId = $c.ClientId; Tenant = (Get-PnPTenantId) }"
     show_command(code, "Testar")
     if DRY:
         return True
     try:
-        secret = need_secret("pnp", p)
+        secret = need_secret("pnp", t)
     except RuntimeError as e:
         say(str(e), "sad")
         return False
-    ok, n, _ = run_ps(f"Testar {p['name']}", code, secret)
+    ok, n, _ = run_ps(f"Testar {t['name']}", code, secret)
     if ok:
-        WORKER.conn["pnp"] = (p["name"], p["admin_url"])
-        celebrate(f"{p['name']} fungerar! Du är ansluten till SharePoint-admin.")
+        WORKER.conn["pnp"] = (t["name"], t["admin_url"])
+        celebrate(f"{t['name']} fungerar! Du är ansluten till SharePoint-admin.")
     else:
-        say("Anslutningen misslyckades. Kolla ClientId, tenant och att appen har samtycke.", "sad")
+        say("Anslutningen misslyckades. Kolla ClientId, domän och att appen har samtycke.", "sad")
     return ok
 
 
-def delete_profile(p):
-    say(f"Ta bort {p['name']}? Profilen" + (", certifikatet och lösenordet i Keychain" if p.get("cert_path") else "")
-        + " försvinner härifrån. Appen i Entra ID finns kvar.", "worry")
-    if not confirm(f"Ta bort {p['name']}?", False):
+def delete_tenant(t):
+    say(f"Ta bort {t['name']} ur listan?" + (" Certifikatet och lösenordet i valvet försvinner också."
+                                             if t.get("cert_path") else "") + " Inget ändras i själva tenanten.", "worry")
+    if not confirm(f"Ta bort {t['name']}?", False):
         return False
-    save_profiles([x for x in profiles() if x["name"] != p["name"]])
-    kc_del(p["name"])
+    save_tenants([x for x in tenants() if x["name"] != t["name"]])
+    if t.get("cert_path"):
+        sec_del(t)
     for ext in (".pfx", ".cer"):
-        f = CERTS / (slug(p["name"]) + ext)
+        f = CERTS / (slug(t["name"]) + ext)
         if f.exists():
             f.unlink()
-    if config().get("active") == p["name"]:
-        rest = profiles()
-        set_config(active=rest[0]["name"] if rest else None)
+    if config().get("active") == t["name"]:
+        set_config(active=None)
         WORKER.stop()
         WORKER.warm()
-    say(f"{p['name']} är borttagen.", "happy")
+    say(f"{t['name']} är borttagen ur listan.", "happy")
     return True
 
 
-def set_client_id(p):
+def set_client_id(t):
     try:
-        cid = ask_text("ClientId (Application ID)", p.get("client_id", ""), required=True,
+        cid = ask_text("ClientId (Application ID)", t.get("client_id", ""), required=True,
                        check=lambda v: None if GUID.match(v) else "Det ser inte ut som en GUID.")
-        if p.get("auth") == "certificate" and not (p.get("cert_path") and kc_get(p["name"])):
-            if not import_cert(p):
+        t = dict(t, client_id=cid)
+        if not t.get("admin_url"):
+            pre = ask_text("SharePoint-namnet? (det som står före .sharepoint.com)", t.get("prefix", ""), required=True)
+            t.update(sp_fields(pre.lower()))
+        if t.get("auth") == "certificate" and not (t.get("cert_path") and sec_get(t)):
+            if not import_cert(t):
                 return
     except Cancel:
         out(dim("  Avbrutet."))
         return
-    ps = profiles()
-    for x in ps:
-        if x["name"] == p["name"]:
-            x.update(client_id=cid, cert_path=p.get("cert_path", x.get("cert_path", "")))
-    save_profiles(ps)
+    save_tenants([x for x in tenants() if x["name"] != t["name"]] + [t])
     say("ClientId sparat.", "proud")
 
 
-def open_shell(p):
-    """Lämnar över terminalen till ett pwsh-skal som redan är anslutet till kundens SharePoint-admin."""
-    if not p.get("client_id"):
-        say(f"{p['name']} saknar ClientId.", "sad")
+def open_shell(t):
+    """Lämnar över terminalen till ett pwsh-skal som redan är anslutet till tenantens SharePoint-admin."""
+    if not t or not t.get("client_id"):
+        say("PowerShell-skalet ansluter med PnP, och den här tenanten har ingen PnP-app än.", "worry")
         return
-    code = connect_code("pnp", p, p["admin_url"])
+    code = connect_code("pnp", t, t["admin_url"])
     print()
     show_command(code, "Öppnar skal")
     if DRY:
         return
     try:
-        secret = need_secret("pnp", p)
+        secret = need_secret("pnp", t)
     except RuntimeError as e:
         say(str(e), "sad")
         return
@@ -1538,106 +2168,149 @@ def open_shell(p):
     if secret:
         env["PUPPA_SECRET"] = secret
     script = code + "\nRemove-Item Env:PUPPA_SECRET -ErrorAction SilentlyContinue\n" + \
-        f"Write-Host \"Ansluten till {p['name']} – skriv exit för att gå tillbaka till Puppa.\" -ForegroundColor Cyan"
-    say(f"Öppnar PowerShell anslutet till {p['name']}. Skriv exit för att komma tillbaka.", "happy")
-    subprocess.call(["pwsh", "-NoLogo", "-NoExit", "-Command", script], env=env)
+        f"Write-Host 'Ansluten till {t['name'].replace(chr(39), chr(39) * 2)} – skriv exit för att gå tillbaka till Puppa.' -ForegroundColor Cyan"
+    say(f"Öppnar PowerShell anslutet till {t['name']}. Skriv exit för att komma tillbaka.", "happy")
+    subprocess.call(ps_args(script, "-NoExit"), env=env)
 
 
-def profiles_menu():
+def tenants_menu():
+    """Listan över tenants du loggat in i. Välj en för att jobba där, eller hantera den."""
     while True:
-        ps = profiles()
-        if not ps:
-            say("Inga profiler än. Ska vi skapa en?", "worry")
-            if confirm("Starta guiden?", True):
-                guide()
+        ts = tenants()
+        rows = tenant_rows()
+        if rows:
+            rows.append(("head", ""))
+        rows += [dict(label="Lägg till tenant…", hint="oftast inte nödvändigt – inloggning sparar automatiskt",
+                      value="__new", key="n"),
+                 dict(label="Ny PnP-appregistrering…", hint="för SharePoint-recept", value="__pnp", key="p"),
+                 dict(label="Tillbaka", value=None, key="q")]
+        name = choose(rows, title="Tenants" + (f" · {len(ts)} st" if ts else ""), status=conn_status, screen=True,
+                      msg="" if ts else "Listan fylls på av sig själv när du loggar in någonstans. "
+                                        "Kör ett recept, eller lägg till en tenant här.",
+                      footer="enter väljer · n ny · p PnP-app · q tillbaka")
+        if name is None:
             return
-        rows = profile_rows() + [("head", ""), dict(label="Ny profil…", value="__new", key="n"),
-                                   dict(label="Tillbaka", value=None, key="q")]
-        name = choose(rows, title="Profiler", footer="enter väljer · n ny · q tillbaka", screen=True)
-        if name == "__new":
-            guide()
+        try:
+            if name == "__new":
+                add_tenant()
+                continue
+            if name == "__pnp":
+                pnp_setup(active_tenant())
+                continue
+        except Cancel:
+            out(dim("  Avbrutet."))
             continue
-        if not name:
-            return
-        p = find_profile(name)
-        out(f"  {accent('▍')}{bold(p['name'])}")
-        print_profile(p)
-        act = choose([dict(label="Använd", hint="gör aktiv", value="use"),
-                      dict(label="Testa anslutningen", hint="Connect-PnPOnline mot admin", value="test"),
-                      dict(label="Öppna PowerShell-skal", hint="anslutet, du tar över", value="shell"),
-                      dict(label="Ange ClientId…", hint="om appen fanns/skapades utanför Puppa", value="cid"),
-                      dict(label="Ta bort…", value="del"),
-                      dict(label="Tillbaka", value=None, key="q")], title=p["name"])
+        t = find_tenant(name)
+        if not t:
+            continue
+        out(f"  {accent('▍')}{bold(t['name'])}")
+        print_tenant(t)
+        has = bool(t.get("client_id"))
+        acts = [dict(label="Jobba här", hint="gör den aktiv", value="use")]
+        if has:
+            acts += [dict(label="Testa PnP-anslutningen", hint="Connect-PnPOnline mot SharePoint-admin", value="test"),
+                     dict(label="PowerShell-skal (PnP)", hint="anslutet, du tar över", value="shell"),
+                     dict(label="Byt ClientId…", value="cid")]
+        else:
+            acts += [dict(label="Ny PnP-appregistrering…", hint="behövs för SharePoint-recept", value="pnp"),
+                     dict(label="Ange befintligt ClientId…", value="cid")]
+        acts += [dict(label="Ta bort ur listan…", value="del"), dict(label="Tillbaka", value=None, key="q")]
+        act = choose(acts, title=t["name"])
         if act == "use":
-            use_profile(p, quiet=True)
+            use_tenant(t, quiet=True)
             return
         if act == "test":
-            test_profile(p)
+            test_pnp(t)
         elif act == "shell":
-            open_shell(p)
+            open_shell(t)
+        elif act == "pnp":
+            pnp_setup(t)
         elif act == "cid":
-            set_client_id(p)
+            set_client_id(t)
         elif act == "del":
-            delete_profile(p)
+            delete_tenant(t)
 
 
-LOGOUT_PS = r"""
-$ut = [System.Collections.Generic.List[string]]::new()
-try { Import-Module PnP.PowerShell -ErrorAction Stop; Disconnect-PnPOnline -ClearPersistedLogin -ErrorAction Stop; $ut.Add('PnP (även sparad inloggning)') } catch { }
-try { Import-Module ExchangeOnlineManagement -ErrorAction Stop; Disconnect-ExchangeOnline -Confirm:$false -ErrorAction Stop *> $null; $ut.Add('Exchange Online') } catch { }
-try { Import-Module MicrosoftTeams -ErrorAction Stop; Disconnect-MicrosoftTeams -Confirm:$false -ErrorAction Stop *> $null; $ut.Add('Teams') } catch { }
-try { Import-Module Microsoft.Graph.Authentication -ErrorAction Stop; Disconnect-MgGraph -ErrorAction Stop *> $null; $ut.Add('Microsoft Graph (även sparad token)') } catch { }
-foreach ($x in $ut) { Write-Host "  utloggad: $x" }
-"""
-LOGOUT_SHOW = """Disconnect-PnPOnline -ClearPersistedLogin
-Disconnect-ExchangeOnline -Confirm:$false
-Disconnect-MicrosoftTeams -Confirm:$false
-Disconnect-MgGraph"""
+LOGOUT_PARTS = {
+    "pnp": ("SharePoint (PnP)", "Disconnect-PnPOnline -ClearPersistedLogin",
+            "Import-Module PnP.PowerShell -ErrorAction Stop; Disconnect-PnPOnline -ClearPersistedLogin -ErrorAction Stop"),
+    "exo": ("Exchange Online", "Disconnect-ExchangeOnline -Confirm:$false",
+            "Import-Module ExchangeOnlineManagement -ErrorAction Stop; Disconnect-ExchangeOnline -Confirm:$false -ErrorAction Stop *> $null"),
+    "teams": ("Teams", "Disconnect-MicrosoftTeams -Confirm:$false",
+              "Import-Module MicrosoftTeams -ErrorAction Stop; Disconnect-MicrosoftTeams -Confirm:$false -ErrorAction Stop *> $null"),
+    "graph": ("Microsoft Graph", "Disconnect-MgGraph",
+              "Import-Module Microsoft.Graph.Authentication -ErrorAction Stop; Disconnect-MgGraph -ErrorAction Stop *> $null"),
+}
 
 
-def logout():
-    """Loggar ut från PnP, Exchange, Teams och Graph, rensar sparade inloggningar och startar en ren session."""
+def logout(parts=None):
+    """Logga ut från valda tjänster (standard: alla) och rensa deras sparade inloggningar."""
+    parts = [x for x in (parts or LOGOUT_PARTS) if x in LOGOUT_PARTS]
     print()
-    show_command(LOGOUT_SHOW, "Loggar ut")
+    show_command("\n".join(LOGOUT_PARTS[x][1] for x in parts), "Loggar ut")
     if DRY:
         return True
-    ok, _, lines = run_ps("Loggar ut från allt", LOGOUT_PS, show_output=False)
+    code = "\n".join(f"try {{ {LOGOUT_PARTS[x][2]}; Write-Host 'utloggad: {LOGOUT_PARTS[x][0]}' }} catch {{ }}"
+                     for x in parts)
+    ok, _, lines = run_ps("Loggar ut från " + (", ".join(LOGOUT_PARTS[x][0] for x in parts)
+                                               if len(parts) < len(LOGOUT_PARTS) else "allt"), code, show_output=False)
     done = [t.split("utloggad: ", 1)[1] for k, t in lines if k == "H" and "utloggad: " in t]
-    WORKER.stop()
-    WORKER.warm()
+    if len(parts) == len(LOGOUT_PARTS):
+        WORKER.stop()
+        WORKER.warm()
+    for x in parts:
+        WORKER.conn.pop(x, None)
+    LOOKUP_CACHE.clear()
     for d in done:
         out("  " + green("✔") + " " + d)
-    say("Utloggad från allt. Nästa recept frågar efter inloggning igen. "
-        "(Webbläsarens Microsoft-inloggning ligger kvar – logga ut där också om datorn delas.)", "happy")
+    say(("Utloggad från allt." if len(parts) == len(LOGOUT_PARTS) else "Utloggad.") +
+        " Nästa gång frågar jag efter inloggning igen. (Webbläsarens Microsoft-inloggning ligger kvar – "
+        "logga ut där också om datorn delas.)", "happy")
     return True
 
 
+def logout_menu(at_exit=False):
+    """Välj vad du loggar ut från. Allt är förvalt."""
+    t = active_tenant()
+    rows = [dict(label="Allt", hint="SharePoint · Exchange · Teams · Graph", value="all")]
+    for k, (name, cmd, _) in LOGOUT_PARTS.items():
+        on = bool(t) and WORKER.conn.get(k, ("",))[0] == t["name"]
+        rows.append(dict(label=f"Bara {name}", hint=("inloggad nu · " if on else "") + cmd, value=k))
+    rows += [("head", ""), dict(label="Nej, förbli inloggad" if at_exit else "Tillbaka", value="__no", key="n" if at_exit else "q")]
+    v = choose(rows, title="Logga ut innan du går?" if at_exit else "Logga ut från…", status=None if at_exit else conn_status,
+               screen=not at_exit)
+    if v in (None, "__no"):
+        return False
+    return logout(None if v == "all" else [v])
+
+
 def connect_menu():
-    p = active_profile()
-    if not p:
-        say("Välj eller skapa en profil först.", "worry")
-        return
-    rows = [dict(label="SharePoint-admin (PnP)", hint=p["admin_url"], value="pnp-admin"),
-            dict(label="SharePoint-sajt (PnP)…", hint="valfri sajt-URL", value="pnp-site"),
-            dict(label="Exchange Online", hint="Connect-ExchangeOnline", value="exo"),
-            dict(label="Teams", hint="Connect-MicrosoftTeams", value="teams"),
+    t = active_tenant()
+    who = t["name"] if t else "välj konto vid inloggning"
+    rows = [dict(label="Exchange Online", hint="Connect-ExchangeOnline", value="exo"),
             dict(label="Microsoft Graph…", hint="Connect-MgGraph med valda scopes", value="graph"),
-            dict(label="Logga ut från allt", hint="PnP · EXO · Teams · Graph + sparade inloggningar", value="off"),
-            dict(label="Tillbaka", value=None, key="q")]
-    v = choose(rows, title=f"Anslut · {p['name']}", status=conn_status, screen=True)
+            dict(label="Teams", hint="Connect-MicrosoftTeams", value="teams")]
+    if t and t.get("client_id"):
+        rows += [dict(label="SharePoint-admin (PnP)", hint=t["admin_url"], value="pnp-admin"),
+                 dict(label="SharePoint-sajt (PnP)…", hint="valfri sajt-URL", value="pnp-site")]
+    else:
+        rows.append(dict(label="SharePoint (PnP)…", hint="kräver en PnP-appregistrering i tenanten", value="pnp-admin"))
+    rows += [dict(label="Logga ut…", hint="allt eller en tjänst i taget", value="off"),
+             dict(label="Tillbaka", value=None, key="q")]
+    v = choose(rows, title=f"Logga in · {who}", status=conn_status, screen=True)
     try:
         if v == "pnp-admin":
-            ensure("pnp", p, p["admin_url"])
+            ensure("pnp", t)
         elif v == "pnp-site":
-            url = ask_text("Sajtens URL", p["root_url"] + "/sites/", required=True)
-            ensure("pnp", p, url)
+            url = ask_text("Sajtens URL", t["root_url"] + "/sites/", required=True)
+            ensure("pnp", t, url)
         elif v in ("exo", "teams"):
-            ensure(v, p)
+            ensure(v, t)
         elif v == "graph":
             sc = ask_text("Scopes (kommaseparerade)", "User.Read.All,Group.Read.All,Organization.Read.All")
-            ensure("graph", p, scopes=[s.strip() for s in sc.split(",") if s.strip()])
+            ensure("graph", t, scopes=[s.strip() for s in sc.split(",") if s.strip()])
         elif v == "off":
-            logout()
+            logout_menu()
     except Cancel:
         out(dim("  Avbrutet."))
 
@@ -1661,6 +2334,19 @@ def recipe_rows(rs):
     return rows + w
 
 
+def recipe_search_rows(rs=None):
+    """Alla recept som sökbara rader (värde 'r:<id>') – för fuzzy-sökning i menyerna."""
+    return [dict(label=r.name, hint=f"{r.category} · {r.desc}", value="r:" + r.id, badge=r.badge(),
+                 search=r.id) for r in (rs or load_recipes())]
+
+
+def run_recipe_by_value(v):
+    r = find_recipe(v[2:])
+    if r:
+        remember_recipe(r.id)
+        run_recipe(r)
+
+
 def recipes_menu():
     """Två steg: kategori → recept. Efter körning stannar man i samma kategori."""
     cat_last = None
@@ -1681,9 +2367,13 @@ def recipes_menu():
             rows.append(dict(label=cname, hint=CAT_HINTS.get(cname, ""), value=cname, badge=dim(str(len(its)))))
         rows += [("head", ""), dict(label="Nytt recept (mall)…", hint="skriv ett eget", value="__new", key="n"),
                  dict(label="Tillbaka", value=None, key="q")]
-        cat = choose(rows, title="Recept · välj område", start=cat_last, status=conn_status, screen=True)
+        cat = choose(rows, title="Recept · välj område", start=cat_last, status=conn_status, screen=True,
+                     search_rows=recipe_search_rows(rs))
         if cat is None:
             return
+        if cat.startswith("r:"):
+            run_recipe_by_value(cat)
+            continue
         if cat == "__new":
             new_recipe()
             continue
@@ -1704,112 +2394,116 @@ def recipes_menu():
 
 # ───────────────────────────── huvudmeny ─────────────────────────────
 def greeting():
-    ps = profiles()
-    p = active_profile()
-    if not ps:
-        return "Hej! Jag är Puppa. Du har inga PnP-profiler än – ska vi skapa den första?", "worry"
-    if not p:
-        return "Välj vilken kund du jobbar med i dag.", "happy"
-    if not p.get("client_id"):
-        return f"{p['name']} saknar fortfarande ClientId. Fyll i det under Profiler, eller kör ett lokalt recept.", "worry"
-    if not WORKER.conn:
-        return f"Hej! Vi jobbar i {p['name']}. Kör ett recept – jag ansluter när det behövs.", "happy"
-    return f"Ansluten och redo i {p['name']}. Vad blir nästa steg?", "happy"
+    ts = tenants()
+    t = active_tenant()
+    if not ts:
+        return ("Hej! Jag är Puppa. Välj ett recept – jag loggar in när det behövs och lägger tenanten i "
+                "listan, så kan du växla sen."), "happy"
+    if not t:
+        return "Välj en tenant i listan, eller kör ett recept så loggar jag in.", "happy"
+    if any(WORKER.conn.get(k, ("",))[0] == t["name"] for k in CONN_NAMES):
+        return "Inloggad och redo. Vad blir nästa steg?", "happy"
+    return "Välkommen tillbaka! Fortsätt där du lämnade, eller börja skriva för att söka bland recepten.", "happy"
 
 
 def main_menu():
     last = None
     while True:
         msg, mood = greeting()
-        ps = profiles()
-        p = active_profile()
-        rows = [dict(label="Recept…", hint="kör en uppgift: lista, skapa, exportera", value="recipes"),
-                dict(label="Byt kund", hint=(p["name"] if p else "välj profil"), value="switch"),
-                dict(label="Ny PnP-profil", hint="guide: app + profil på några steg", value="new"),
-                dict(label="Profiler…", hint="lista, testa, ClientId, ta bort", value="profiles"),
-                dict(label="Anslut…", hint="PnP · Exchange · Teams · Graph", value="connect"),
-                dict(label="PowerShell-skal", hint="anslutet till kunden, du tar över", value="shell"),
-                dict(label="Logga ut från allt", hint="PnP · Exchange · Teams · Graph", value="logout", key="u"),
-                dict(label="Avsluta", value="quit", key="q")]
-        if not ps:
-            rows.insert(0, rows.pop(2))
-            rows = [r for r in rows if r["value"] not in ("profiles", "connect", "shell")]
-        if len(ps) < 2:
-            rows = [r for r in rows if r["value"] != "switch"]
-        v = choose(rows, msg=msg, mood=mood, status=conn_status, start=last,
-                   footer="↑/↓ · enter · siffra väljer · q avslutar" if width() >= 50 else None,
-                   sub=f"puppa {VERSION}" + ("  ·  torrkörning" if DRY else ""), screen=True)
+        ts = tenants()
+        t = active_tenant()
+        rows = []
+        by_id = {r.id: r for r in load_recipes()}
+        recent = [by_id[x] for x in config().get("recent", []) if x in by_id][:3]
+        if t and recent:
+            rows.append(("head", f"Fortsätt där du lämnade · {t['name']}"))
+            rows += [dict(label=r.name, hint=r.category, value="r:" + r.id, badge=r.badge()) for r in recent]
+            rows.append(("head", ""))
+        rows += [dict(label="Tenants…", hint=(f"{t['name']} · " if t else "") +
+                     (f"{len(ts)} sparade – välj vilken du jobbar i" if ts else "listan fylls på när du loggar in"),
+                     value="tenants", key="t"),
+                dict(label="Recept…", hint="kör en uppgift: lista, skapa, exportera", value="recipes"),
+                dict(label="Logga in…", hint="Exchange · Graph · Teams · SharePoint (PnP)", value="connect"),
+                dict(label="Ny PnP-appregistrering", hint="behövs bara för SharePoint-recept", value="pnp")]
+        if t and t.get("client_id"):
+            rows.append(dict(label="PowerShell-skal (PnP)", hint="anslutet till tenanten, du tar över", value="shell"))
+        rows += [dict(label="Logga ut…", hint="allt eller en tjänst i taget", value="logout", key="u"),
+                 dict(label="Avsluta", value="quit", key="q")]
+        v = choose(rows, msg=msg, mood=mood, status=conn_status,
+                   start=last or ("r:" + recent[0].id if t and recent else "recipes"),
+                   footer="↑/↓ · enter · siffra/bokstav väljer · q avslutar",
+                   sub=f"puppa {VERSION}" + ("  ·  torrkörning" if DRY else ""), screen=True,
+                   search_rows=recipe_search_rows())
         last = v
         if v in (None, "quit"):
             print()
-            if WORKER.conn and confirm("Logga ut från allt innan du går?", False):
-                logout()
-            say(random.choice(["Hej då!", "Vi ses!",
-                               "Hej då! -WhatIf var med dig."]), "happy")
+            if WORKER.conn:
+                try:
+                    logout_menu(at_exit=True)
+                except Cancel:
+                    pass
+            say(random.choice(["Hej då!", "Vi ses!", "Hej då! -WhatIf var med dig."]), "happy")
             print()
             return
-        if v == "recipes":
-            recipes_menu()
-        elif v == "switch":
-            name = choose(profile_rows() + [dict(label="Tillbaka", value=None, key="q")], title="Byt kund",
-                          start=config().get("active"), screen=True)
-            if name:
-                use_profile(find_profile(name), quiet=True)
-        elif v == "new":
-            guide()
-        elif v == "logout":
-            logout()
-        elif v == "profiles":
-            profiles_menu()
-        elif v == "connect":
-            connect_menu()
-        elif v == "shell":
-            if p:
-                open_shell(p)
-            else:
-                say("Välj eller skapa en profil först.", "worry")
+        try:
+            if v.startswith("r:"):
+                run_recipe_by_value(v)
+            elif v == "recipes":
+                recipes_menu()
+            elif v == "tenants":
+                tenants_menu()
+            elif v == "pnp":
+                pnp_setup(t)
+            elif v == "logout":
+                logout_menu()
+            elif v == "connect":
+                connect_menu()
+            elif v == "shell":
+                open_shell(t)
+        except Cancel:
+            out(dim("  Avbrutet."))
 
 
 # ───────────────────────────── CLI ─────────────────────────────
-def list_profiles():
-    ps = profiles()
-    if not ps:
-        say("Inga profiler än. Kör puppa ny.", "worry")
+def list_tenants():
+    ts = tenants()
+    if not ts:
+        say("Inga tenants än. De sparas automatiskt när du loggar in via ett recept (eller: puppa ny).", "happy")
         return
     act = config().get("active")
     w = width()
-    nw = min(max(len(p["name"]) for p in ps) + 2, 24)
-    for p in ps:
-        mark = green("●") if p["name"] == act else dim("○")
-        cid = (p.get("client_id") or "")[:8] or yellow("saknas")
+    nw = min(max(len(t["name"]) for t in ts) + 2, 24)
+    for t in sorted(ts, key=lambda x: x.get("last") or x.get("created") or "", reverse=True):
+        mark = green("●") if t["name"] == act else dim("○")
+        pnp = cyan("PnP") if t.get("client_id") else dim("–")
         if w >= 72:
-            out(f"  {mark} {pad(bold(cut(p['name'], nw)), nw)}{pad(cut(p['tenant'], 30), 32)}"
-                f"{pad(AUTHS.get(p.get('auth'), '?').split(' (')[0], 13)}{dim(cid)}")
+            out(f"  {mark} {pad(bold(cut(t['name'], nw)), nw)}{pad(cut(t.get('tenant', ''), 32), 34)}{pad(pnp, 5)}"
+                + dim(cut(t.get("upn", ""), max(4, w - nw - 46))))
         elif w >= 44:
-            out(f"  {mark} {pad(bold(cut(p['name'], nw)), nw)}{dim(cut(p['tenant'], w - nw - 6))}")
+            out(f"  {mark} {pad(bold(cut(t['name'], nw)), nw)}{dim(cut(t.get('tenant', ''), w - nw - 6))}")
         else:
-            out(f"  {mark} {bold(p['name'])}")
-            out(f"    {dim(cut(p['tenant'], w - 6))}")
+            out(f"  {mark} {bold(t['name'])}")
+            out(f"    {dim(cut(t.get('tenant', ''), w - 6))}")
 
 
 def list_recipes():
     rs = load_recipes()
     w = width()
-    nw = min(max(len(r.id) for r in rs) + 2, 30)
+    nw = min(max(len(r.id) for r in rs) + 2, 36)
     cat = None
     for r in rs:
         if r.category != cat:
             cat = r.category
             out("  " + accent("▍") + bold(cat))
         if w >= 58:
-            out(f"    {pad(cut(r.id, nw), nw)}{pad(r.badge(), 8)}" + (dim(r.name) if w >= 72 else ""))
+            out(f"    {pad(cut(r.id, nw), nw)}{pad(r.badge(), 8)}" + (dim(r.name) if w >= 80 else ""))
         else:
             out(f"    {cut(r.id, w - 14)} {r.badge()}")
 
 
 def main(argv=None):
     import argparse
-    global ANIM, DRY, ITTY
+    global ANIM, DRY
     argv = list(sys.argv[1:] if argv is None else argv)
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--no-anim", action="store_true")
@@ -1822,14 +2516,16 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="puppa", description="Puppa – M365-admin i PowerShell med några knapptryck.")
     ap.add_argument("--version", action="version", version="puppa " + VERSION)
     sub = ap.add_subparsers(dest="cmd")
-    sub.add_parser("ny", help="guide: ny PnP-profil")
-    sub.add_parser("profiler", help="lista profiler")
-    u = sub.add_parser("använd", aliases=["anvand", "use"], help="gör en profil aktiv")
-    u.add_argument("profil")
+    sub.add_parser("tenants", aliases=["kunder", "profiler"], help="tenants du loggat in i")
+    u = sub.add_parser("tenant", aliases=["kund", "använd", "anvand", "use"], help="växla tenant")
+    u.add_argument("namn")
+    sub.add_parser("ny", help="lägg till en tenant för hand")
+    pp = sub.add_parser("pnp", help="ny PnP-appregistrering för en tenant")
+    pp.add_argument("namn", nargs="?")
     t = sub.add_parser("test", help="testa PnP-anslutning")
-    t.add_argument("profil", nargs="?")
-    s = sub.add_parser("skal", aliases=["shell"], help="öppna anslutet pwsh-skal")
-    s.add_argument("profil", nargs="?")
+    t.add_argument("namn", nargs="?")
+    s = sub.add_parser("skal", aliases=["shell"], help="öppna anslutet pwsh-skal (PnP)")
+    s.add_argument("namn", nargs="?")
     sub.add_parser("recept", help="lista recept")
     k = sub.add_parser("kör", aliases=["kor", "run"], help="kör ett recept")
     k.add_argument("recept")
@@ -1839,22 +2535,17 @@ def main(argv=None):
     sub.add_parser("hej")
     a = ap.parse_args(rest)
 
-    def sigint(*_):
-        sys.stdout.write("\033[?25h\n")
-        sys.stdout.flush()
-        WORKER.stop()
-        os._exit(130)
-
     if not shutil.which("pwsh"):
-        say("Jag hittar inte pwsh (PowerShell 7). Installera med: brew install powershell", "sad")
+        say("Jag hittar inte pwsh (PowerShell 7). Installera det: Windows: winget install Microsoft.PowerShell · "
+            "macOS: brew install powershell · eller: uppa install powershell", "sad")
         return 1
 
-    def pick_profile(name):
-        p = find_profile(name) if name else active_profile()
-        if not p:
-            say(f"Hittar ingen profil {name or '(ingen aktiv)'}. Se puppa profiler.", "sad")
+    def pick(name):
+        t = find_tenant(name) if name else active_tenant()
+        if not t:
+            say(f"Hittar ingen tenant {name or '(ingen vald)'}. Se puppa tenants.", "sad")
             sys.exit(1)
-        return p
+        return t
 
     try:
         if a.cmd is None:
@@ -1863,25 +2554,28 @@ def main(argv=None):
                 return 0
             signal.signal(signal.SIGINT, signal.default_int_handler)
             WORKER.warm()
-            print()
             main_menu()
+            return 0
+        if a.cmd in ("tenants", "kunder", "profiler"):
+            list_tenants()
+            return 0
+        if a.cmd in ("tenant", "kund", "använd", "anvand", "use"):
+            use_tenant(pick(a.namn))
             return 0
         if a.cmd == "ny":
             if not ITTY:
+                sys.exit("  behöver en riktig terminal")
+            return 0 if add_tenant() else 1
+        if a.cmd == "pnp":
+            if not ITTY:
                 sys.exit("  guiden behöver en riktig terminal")
             WORKER.warm()
-            return 0 if guide() else 1
-        if a.cmd == "profiler":
-            list_profiles()
-            return 0
-        if a.cmd in ("använd", "anvand", "use"):
-            use_profile(pick_profile(a.profil))
-            return 0
+            return 0 if pnp_setup(find_tenant(a.namn) if a.namn else active_tenant()) else 1
         if a.cmd == "test":
             WORKER.warm()
-            return 0 if test_profile(pick_profile(a.profil)) else 1
+            return 0 if test_pnp(pick(a.namn)) else 1
         if a.cmd in ("skal", "shell"):
-            open_shell(pick_profile(a.profil))
+            open_shell(pick(a.namn))
             return 0
         if a.cmd == "recept":
             list_recipes()
@@ -1903,8 +2597,12 @@ def main(argv=None):
             say(random.choice(JOKES), random.choice(["happy", "proud", "wow", "left"]))
             print()
             return 0
+    except Cancel:
+        out(dim("  Avbrutet."))
+        return 1
     except KeyboardInterrupt:
-        sigint()
+        sys.stdout.write("\033[?25h\n")
+        return 130
     finally:
         WORKER.stop()
     return 0

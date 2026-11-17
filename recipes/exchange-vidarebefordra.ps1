@@ -4,7 +4,7 @@ kategori:    Exchange
 typ:         ändrar
 kräver:      exo
 beskrivning: Vidarebefordrar e-post från en postlåda till en annan adress (eller stänger av).
-param:       Postlada | Postlådan (adress) |
+param:       Postlada | Postlådan (adress) | | @mailbox
 param:       Till? | Vidarebefordra till (tomt = stäng av) |
 param:       Kopia | Behåll kopia i postlådan? | Ja | Ja,Nej
 #>

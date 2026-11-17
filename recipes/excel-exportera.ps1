@@ -4,7 +4,7 @@ kategori:    Excel
 typ:         lokal
 kräver:      ingen
 beskrivning: Sparar det förra receptets resultat som en formaterad .xlsx (ImportExcel).
-param:       Filnamn | Filnamn (utan .xlsx) | {profil}-{datum}
+param:       Filnamn | Filnamn (utan .xlsx) | {kund}-{datum}
 param:       Oppna | Öppna filen efteråt? | Ja | Ja,Nej
 #>
 $senaste = Join-Path $env:PUPPA_DIR 'senaste.xml'
@@ -20,4 +20,4 @@ if (-not $rows.Count) { throw 'Förra resultatet var bara text – inget att lä
 $rows = $rows | Select-Object * -ExcludeProperty PSComputerName, RunspaceId, PSShowComputerName
 $rows | Export-Excel -Path $path -WorksheetName 'Puppa' -FreezeTopRow -BoldTopRow -TableStyle Medium2 -ClearSheet
 Write-Host "Sparat $($rows.Count) rader i $path"
-if ($Oppna -eq 'Ja') { & open $path }
+if ($Oppna -eq 'Ja') { Invoke-Item -LiteralPath $path }

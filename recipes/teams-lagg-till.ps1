@@ -4,8 +4,8 @@ kategori:    Teams
 typ:         ändrar
 kräver:      teams
 beskrivning: Lägger till en eller flera användare i ett team, som medlem eller ägare.
-param:       Team | Teamets namn |
-param:       Anvandare | Användare (UPN, flera med komma) |
+param:       Team | Teamets namn | | @team
+param:       Anvandare | Användare (UPN, flera med komma) | | @user+
 param:       Roll | Roll | Member | Member,Owner
 #>
 $t = @(Get-Team -DisplayName $Team)

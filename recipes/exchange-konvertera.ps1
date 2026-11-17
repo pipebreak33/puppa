@@ -4,7 +4,7 @@ kategori:    Exchange
 typ:         ändrar
 kräver:      exo
 beskrivning: Gör om en användarpostlåda till delad (t.ex. vid offboarding, frigör sedan licensen).
-param:       Postlada | Postlådan (adress) |
+param:       Postlada | Postlådan (adress) | | @mailbox
 #>
 Set-Mailbox -Identity $Postlada -Type Shared -ErrorAction Stop
 Get-EXOMailbox -Identity $Postlada | Select-Object DisplayName, PrimarySmtpAddress, RecipientTypeDetails

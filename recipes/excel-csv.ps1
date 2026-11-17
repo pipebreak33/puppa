@@ -4,7 +4,7 @@ kategori:    Excel
 typ:         lokal
 kräver:      ingen
 beskrivning: Sparar förra resultatet som CSV med semikolon och UTF-8 (öppnas rätt i svensk Excel).
-param:       Filnamn | Filnamn (utan .csv) | {profil}-{datum}
+param:       Filnamn | Filnamn (utan .csv) | {kund}-{datum}
 #>
 $senaste = Join-Path $env:PUPPA_DIR 'senaste.xml'
 if ((-not $global:PuppaLast -or -not @($global:PuppaLast).Count) -and (Test-Path $senaste)) { $global:PuppaLast = Import-Clixml $senaste }

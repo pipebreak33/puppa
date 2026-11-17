@@ -4,8 +4,8 @@ kategori:    Grupper
 typ:         ändrar
 kräver:      graph:GroupMember.ReadWrite.All,User.Read.All
 beskrivning: Tar bort användare ur en Microsoft 365- eller säkerhetsgrupp.
-param:       Grupp | Gruppens namn eller e-post |
-param:       Anvandare | Användare (UPN, flera med komma) |
+param:       Grupp | Gruppens namn eller e-post | | @group
+param:       Anvandare | Användare (UPN, flera med komma) | | @user+
 #>
 $q = $Grupp -replace "'", "''"
 $g = @(Get-MgGroup -Filter "displayName eq '$q' or mail eq '$q'" -All)

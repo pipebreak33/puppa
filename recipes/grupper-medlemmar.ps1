@@ -4,7 +4,7 @@ kategori:    Grupper
 typ:         läs
 kräver:      graph:Group.Read.All,User.Read.All
 beskrivning: Medlemmar och ägare i en grupp (namn eller e-post).
-param:       Grupp | Gruppens namn eller e-post |
+param:       Grupp | Gruppens namn eller e-post | | @group
 #>
 $q = $Grupp -replace "'", "''"
 $g = @(Get-MgGroup -Filter "displayName eq '$q' or mail eq '$q'" -All)

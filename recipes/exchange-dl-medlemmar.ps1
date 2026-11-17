@@ -4,7 +4,7 @@ kategori:    Exchange
 typ:         läs
 kräver:      exo
 beskrivning: Vilka som är med i en distributionslista.
-param:       Lista | Listans namn eller adress |
+param:       Lista | Listans namn eller adress | | @dl
 #>
 Get-DistributionGroupMember -Identity $Lista -ResultSize Unlimited | Sort-Object DisplayName |
     Select-Object DisplayName, PrimarySmtpAddress, RecipientType

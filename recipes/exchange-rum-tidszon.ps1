@@ -4,7 +4,7 @@ kategori:    Exchange
 typ:         ändrar
 kräver:      exo
 beskrivning: Sätter tidszon och språk på en rumsresurs så att bokningar visas rätt.
-param:       Rum | Rummets adress |
+param:       Rum | Rummets adress | | @mailbox
 param:       Tidszon | Tidszon | W. Europe Standard Time
 param:       Sprak | Språk | sv-SE | sv-SE,en-US,nb-NO,da-DK,fi-FI
 #>

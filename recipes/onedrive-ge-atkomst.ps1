@@ -4,8 +4,8 @@ kategori:    OneDrive
 typ:         ändrar
 kräver:      pnp-admin
 beskrivning: Lägger till en administratör på en användares OneDrive, t.ex. vid offboarding.
-param:       Anvandare | Vems OneDrive? (UPN) |
-param:       Till | Vem ska få åtkomst? (UPN) | {upn}
+param:       Anvandare | Vems OneDrive? (UPN) | | @spuser
+param:       Till | Vem ska få åtkomst? (UPN) | {upn} | @spuser
 #>
 $url = (Get-PnPUserProfileProperty -Account $Anvandare -Properties PersonalUrl -ErrorAction Stop).PersonalUrl
 if (-not $url) { throw "Ingen OneDrive hittad för $Anvandare." }

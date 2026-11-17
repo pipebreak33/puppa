@@ -1,46 +1,61 @@
 # Puppa
 
 Vanliga M365-adminuppgifter i PowerShell med några knapptryck, i stället för att skriva cmdlets.
-Syskon till [uppa](https://github.com/pipebreak33/uppa). Maskoten är ett P med ögon: den föreslår nästa steg, blinkar och tittar runt
-medan något körs, blir glad när det gick bra och ledsen vid fel.
+Fungerar likadant på **Windows, macOS och Linux**. Syskon till [uppa](https://github.com/pipebreak33/uppa).
+Maskoten är ett P med ögon: den föreslår nästa steg, blinkar och tittar runt medan något körs,
+blir glad när det gick bra och ledsen vid fel.
 
-## Installera
+## Installera (eller uppdatera – kör samma rad igen)
 
-Kräver macOS (Keychain), Python 3.8+, PowerShell 7 (`brew install powershell`) och de moduler du vill använda:
-PnP.PowerShell 3.x, ExchangeOnlineManagement, MicrosoftTeams, Microsoft.Graph, ImportExcel.
+**Windows** (PowerShell):
 
-```bash
-git clone https://github.com/pipebreak33/puppa.git ~/puppa
+```powershell
+irm https://raw.githubusercontent.com/pipebreak33/puppa/main/install.ps1 | iex
 ```
 
-```bash
-ln -sf ~/puppa/puppa.py ~/.local/bin/puppa
-```
+**macOS / Linux:**
 
 ```bash
-puppa
+curl -fsSL https://raw.githubusercontent.com/pipebreak33/puppa/main/install.sh | sh
 ```
 
-## Kom igång
+Installern hittar (eller på Windows installerar) Python 3.8+, lägger Puppa i `~/.puppa/app` och skapar kommandot
+`puppa` (`~/.local/bin/puppa`, eller `%USERPROFILE%\.puppa\bin\puppa.cmd` + PATH på Windows). Dina tenants och
+egna recept i `~/.puppa` rörs aldrig vid uppdatering. Den varnar om PowerShell 7 eller modulerna saknas.
+Med [uppa](https://github.com/pipebreak33/uppa) kan Puppa också installeras och uppdateras därifrån.
 
-1. **Ny PnP-profil**: guiden frågar efter kund, tenant och inloggningssätt och registrerar sedan
-   Entra ID-appen (`Register-PnPEntraIDAppForInteractiveLogin` eller `Register-PnPEntraIDApp` för
-   certifikat). Du ser exakt vilket kommando som körs, och inget skapas i tenanten om du inte svarar **j**.
-   Har kunden redan en app klistrar du in dess ClientId i stället.
-2. **Recept…** → välj område → välj recept. Puppa frågar efter det som behövs, visar kommandot och
-   ansluter själv (PnP/Exchange/Teams/Graph) första gången. Anslutningarna lever kvar under sessionen.
-3. Recept märkta **ändrar** kräver alltid ett **j**. Recept märkta **läs** körs direkt.
-4. **Exportera senaste resultat till Excel/CSV** sparar förra receptets resultat i `~/Documents/Puppa/`.
-5. **Logga ut från allt** (`u`) kopplar från PnP, Exchange, Teams och Graph och rensar sparade inloggningar.
+Styr källan med `PUPPA_REPO=ägare/repo` och `PUPPA_BRANCH=gren`. Från en lokal kopia: `./install.sh` / `./install.ps1`.
+
+Kräver PowerShell 7 (`pwsh`) och de moduler du vill använda: PnP.PowerShell 3.x, ExchangeOnlineManagement,
+MicrosoftTeams, Microsoft.Graph, ImportExcel, Microsoft.PowerShell.SecretManagement + SecretStore.
+
+## Så funkar det
+
+- **Ingen förberedelse.** Välj ett recept. Puppa loggar in när det behövs (Exchange, Graph, Teams) och lägger
+  tenanten i **Tenants**-listan med domän och konto, så att du kan växla mellan kunder senare.
+- **Fortsätt där du lämnade.** Startskärmen visar tenanten du jobbade i och dina senaste recept överst.
+- **Sök överallt.** Börja skriva i vilken meny som helst så filtreras den fuzzy. I huvudmenyn söker du direkt
+  bland alla recept (`delad`, `postl`, `spärra` …).
+- **Sök i tenanten.** När ett recept frågar efter användare, grupp, postlåda, distributionslista, sajt, team eller
+  licens räcker en del av namnet – `johan` ger en lista att välja ur, en enda träff väljs direkt.
+- **SharePoint = PnP.** Bara SharePoint-recepten går via PnP PowerShell, som kräver en egen Entra ID-app per tenant.
+  Första gången frågar Puppa om en **ny PnP-appregistrering** (`Register-PnPEntraIDAppForInteractiveLogin` /
+  `Register-PnPEntraIDApp`) eller ett befintligt ClientId. Inget skapas i tenanten utan att du svarar **j**.
+- **Du ser alltid kommandot** som körs. Recept märkta **ändrar** kräver ett **j**, och Puppa loggar in först så att
+  du ser vilken tenant ändringen hamnar i. **läs**-recept körs direkt.
+- **Exportera** förra resultatet till Excel (ImportExcel) eller CSV (semikolon, UTF-8) i `~/Documents/Puppa/`.
+- **Logga ut…** från allt (förvalt) eller en tjänst i taget. Rensar även sparade inloggningar
+  (PnP `-ClearPersistedLogin`, Graph-token). Puppa frågar också när du avslutar.
 
 ## Kommandon
 
 | | |
 |---|---|
 | `puppa` | menyn |
-| `puppa ny` | guiden för ny PnP-profil |
-| `puppa profiler` · `puppa använd KUND` · `puppa test [KUND]` | profiler |
-| `puppa skal [KUND]` | pwsh-skal som redan kört `Connect-PnPOnline`, du tar över |
+| `puppa tenants` · `puppa tenant NAMN` | lista / växla tenant |
+| `puppa ny` | lägg till en tenant för hand (oftast onödigt) |
+| `puppa pnp [TENANT]` | ny PnP-appregistrering (eller ange ClientId) |
+| `puppa test [TENANT]` · `puppa skal [TENANT]` | testa PnP / pwsh-skal som redan kört `Connect-PnPOnline` |
 | `puppa recept` | lista alla recept |
 | `puppa kör RECEPT Namn=värde … [--ja]` | kör ett recept utan meny |
 | `puppa logga-ut` | logga ut från allt |
@@ -64,30 +79,35 @@ Välj **Nytt recept (mall)…** eller lägg en `.ps1` i `~/.puppa/recipes/` (den
 
 ```powershell
 <#PUPPA
-namn:        Lista team
+namn:        Medlemmar i ett team
 kategori:    Teams
 typ:         läs                 # läs | ändrar | lokal
 kräver:      teams               # ingen | pnp-admin | pnp:Url | exo | teams | graph:Scope1,Scope2
-beskrivning: Alla team med synlighet.
-param:       Filter? | Del av teamnamnet |                 # ? = valfri
-param:       Roll | Roll | Member | Member,Owner           # namn | fråga | standard | val
+beskrivning: Ägare, medlemmar och gäster i ett team.
+param:       Team | Teamets namn | | @team               # @… = sök i tenanten
+param:       Roll | Roll | Member | Member,Owner          # namn | fråga | standard | val
+param:       Filter? | Del av namnet |                    # ? = valfri
 #>
-Get-Team | Where-Object { -not $Filter -or $_.DisplayName -like "*$Filter*" } | Select-Object DisplayName, Visibility
+$t = Get-Team -DisplayName $Team
+Get-TeamUser -GroupId $t.GroupId | Where-Object { $_.Role -eq $Roll } | Select-Object Name, User, Role
 ```
 
-Parametrarna blir variabler (`$Filter`). I standardvärden och skript fungerar `{tenant}` `{prefix}`
-`{adminUrl}` `{rootUrl}` `{upn}` `{profil}` `{datum}`. Returnera objekt så går resultatet att exportera.
+Uppslag: `@user` `@group` `@sku` (Graph) · `@mailbox` `@recipient` `@dl` (Exchange) · `@site` `@spuser` (PnP) ·
+`@team` (Teams). Lägg till `+` för flera värden (`@user+` blir `a@x.se,b@x.se`).
+Parametrarna blir variabler (`$Team`). I standardvärden och skript fungerar `{tenant}` `{prefix}`
+`{adminUrl}` `{rootUrl}` `{upn}` `{kund}` `{datum}`. Returnera objekt så går resultatet att exportera.
 
 ## Säkerhet
 
-- `~/.puppa/profiles.json` innehåller inga hemligheter (tenant, URL:er, ClientId, inloggningssätt).
-- Certifikatprofiler: `.pfx` i `~/.puppa/certs/` (chmod 600, lösenordsskyddad) och lösenordet i
-  **macOS Keychain** (tjänst `puppa`). Lösenordet skickas till PowerShell via en miljövariabel som tas
-  bort direkt efter anslutningen, aldrig på kommandoraden.
-- Interaktiv/enhetskod använder `-PersistLogin`, så du slipper logga in varje gång. **Logga ut från allt** rensar det.
+- `~/.puppa/kunder.json` innehåller inga hemligheter (namn, domän, tenant-id, konto, ClientId, inloggningssätt).
+- Certifikatlösenord (app-only PnP) ligger i PowerShells **SecretManagement**, i valvet `Puppa` (SecretStore),
+  på alla plattformar. Saknas ett valv frågar Puppa om det ska låsas med eget lösenord eller bara med ditt
+  användarkonto. Lösenordet når PowerShell via en miljövariabel som tas bort direkt efter anslutningen,
+  aldrig på kommandoraden. `.pfx`-filen ligger lösenordsskyddad i `~/.puppa/certs/`.
 
 ## Teknik
 
-En enda Python-fil (bara standardbiblioteket, 3.8+) plus recepten som `.ps1`. En långlivad `pwsh`-process
-kör recepten så att anslutningarna överlever mellan körningar. Layouten skalar med terminalen: inga rader
-radbryts, smal layout under 58 kolumner, maskoten döljs under 44, och allt ritas om vid fönsterändring.
+En Python-fil (bara standardbiblioteket, 3.8+) plus recepten som `.ps1`. En långlivad `pwsh`-process kör recepten,
+så inloggningarna lever mellan körningarna. Tangenter läses med `msvcrt` på Windows och `termios` på macOS/Linux.
+Layouten skalar med terminalen: inga rader radbryts, smal layout under 58 kolumner, maskoten döljs under 44, och allt
+ritas om när fönstret ändrar storlek (även på Windows, där SIGWINCH saknas).

@@ -4,7 +4,7 @@ kategori:    Teams
 typ:         läs
 kräver:      teams
 beskrivning: Standard-, privata och delade kanaler.
-param:       Team | Teamets namn |
+param:       Team | Teamets namn | | @team
 #>
 $t = @(Get-Team -DisplayName $Team)
 if ($t.Count -ne 1) { throw "Hittade $($t.Count) team som heter '$Team'." }

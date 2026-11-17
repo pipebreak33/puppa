@@ -4,8 +4,8 @@ kategori:    Exchange
 typ:         ändrar
 kräver:      exo
 beskrivning: Fullbehörighet och/eller Skicka som för en eller flera användare.
-param:       Postlada | Postlådan (adress) |
-param:       Anvandare | Vem ska få åtkomst? (UPN, flera med komma) |
+param:       Postlada | Postlådan (adress) | | @mailbox
+param:       Anvandare | Vem ska få åtkomst? (UPN, flera med komma) | | @recipient+
 param:       Atkomst | Vad ska de få? | Fullbehörighet + Skicka som | Fullbehörighet + Skicka som,Bara fullbehörighet,Bara Skicka som,Skicka för (send on behalf)
 param:       Automapping | Visa automatiskt i Outlook? | Ja | Ja,Nej
 #>

@@ -4,7 +4,7 @@ kategori:    SharePoint
 typ:         läs
 kräver:      pnp:Url
 beskrivning: Visar raderade filer (första och andra steget), senaste först.
-param:       Url | Sajtens URL | {rootUrl}/sites/
+param:       Url | Sajtens URL | {rootUrl}/sites/ | @site
 param:       Filter? | Del av filnamn |
 param:       Antal | Max antal rader | 100
 #>
