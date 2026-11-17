@@ -40,7 +40,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 HOME = Path.home()
 DIR = Path(os.environ.get("PUPPA_DIR") or HOME / ".puppa")
 os.environ["PUPPA_DIR"] = str(DIR)
@@ -1016,12 +1016,14 @@ while ($true) {
 
 
 class Worker:
-    """En långlivad pwsh-process: anslutningar (PnP, EXO, Teams, Graph) lever kvar mellan recepten."""
+    """En långlivad pwsh-process: anslutningarna lever kvar mellan recepten.
+    kinds = vilka anslutningar processen äger; conn delas mellan processerna (se Workers)."""
 
-    def __init__(self):
+    def __init__(self, kinds=(), conn=None):
         self.p = None
         self.q = queue.Queue()
-        self.conn = {}
+        self.kinds = set(kinds)
+        self.conn = {} if conn is None else conn
         self.lock = threading.Lock()
         self.ready = threading.Event()
 
@@ -1029,7 +1031,7 @@ class Worker:
         with self.lock:
             if self.p and self.p.poll() is None:
                 return
-            self.conn = {}
+            self.forget()
             self.ready.clear()
             DIR.mkdir(parents=True, exist_ok=True)
             private(DIR)
@@ -1051,6 +1053,10 @@ class Worker:
                 break
         self.ready.set()
 
+    def forget(self):
+        for k in self.kinds:
+            self.conn.pop(k, None)
+
     def warm(self):
         threading.Thread(target=self.start, daemon=True).start()
 
@@ -1062,7 +1068,7 @@ class Worker:
             except Exception:
                 self.p.kill()
         self.p = None
-        self.conn = {}
+        self.forget()
 
     def restart(self):
         self.stop()
@@ -1100,7 +1106,39 @@ class Worker:
                 on_event("H", ln)
 
 
-WORKER = Worker()
+class Workers:
+    """PnP.PowerShell och ExchangeOnlineManagement/Graph/Teams laddar olika versioner av MSAL
+    (Microsoft.Identity.Client). I samma process vinner den som laddas först och den andra kraschar
+    ("Method not found … WithBroker"). Därför: PnP i en egen pwsh, allt annat i en annan."""
+    PNP = re.compile(r"\b[A-Za-z]+-PnP[A-Za-z]")
+
+    def __init__(self):
+        self.conn = {}
+        self.main = Worker(("exo", "teams", "graph"), self.conn)
+        self.pnp = Worker(("pnp",), self.conn)
+
+    def pick(self, code):
+        return self.pnp if self.PNP.search(code) else self.main
+
+    def run(self, code, on_event, secret=None):
+        return self.pick(code).run(code, on_event, secret)
+
+    def start(self):
+        self.main.start()
+
+    def warm(self):
+        self.main.warm()          # PnP-processen startas först när något PnP-kommando körs
+
+    def stop(self):
+        self.main.stop()
+        self.pnp.stop()
+
+    def restart(self):
+        self.stop()
+        self.start()
+
+
+WORKER = Workers()
 
 
 class Runner:
@@ -2347,10 +2385,15 @@ def logout(parts=None):
     show_command("\n".join(LOGOUT_PARTS[x][1] for x in parts), "Loggar ut")
     if DRY:
         return True
-    code = "\n".join(f"try {{ {LOGOUT_PARTS[x][2]}; Write-Host 'utloggad: {LOGOUT_PARTS[x][0]}' }} catch {{ }}"
-                     for x in parts)
-    ok, _, lines = run_ps("Loggar ut från " + (", ".join(LOGOUT_PARTS[x][0] for x in parts)
-                                               if len(parts) < len(LOGOUT_PARTS) else "allt"), code, show_output=False)
+    title = "Loggar ut från " + (", ".join(LOGOUT_PARTS[x][0] for x in parts)
+                                 if len(parts) < len(LOGOUT_PARTS) else "allt")
+    lines = []
+    # PnP och övriga tjänster bor i var sin PowerShell-process (se Workers) – en körning per process
+    for group in ([x for x in parts if x == "pnp"], [x for x in parts if x != "pnp"]):
+        if group:
+            code = "\n".join(f"try {{ {LOGOUT_PARTS[x][2]}; Write-Host 'utloggad: {LOGOUT_PARTS[x][0]}' }} catch {{ }}"
+                             for x in group)
+            lines += run_ps(title, code, show_output=False)[2]
     done = [t.split("utloggad: ", 1)[1] for k, t in lines if k == "H" and "utloggad: " in t]
     if len(parts) == len(LOGOUT_PARTS):
         WORKER.stop()

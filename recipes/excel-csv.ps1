@@ -7,7 +7,8 @@ beskrivning: Sparar förra resultatet som CSV med semikolon och UTF-8 (öppnas r
 param:       Filnamn | Filnamn (utan .csv) | {kund}-{datum}
 #>
 $senaste = Join-Path $env:PUPPA_DIR 'senaste.xml'
-if ((-not $global:PuppaLast -or -not @($global:PuppaLast).Count) -and (Test-Path $senaste)) { $global:PuppaLast = Import-Clixml $senaste }
+# PnP-recept körs i en egen PowerShell-process – filen har alltid det senaste resultatet
+if (Test-Path $senaste) { $global:PuppaLast = Import-Clixml $senaste }
 $rows = @($global:PuppaLast | Where-Object { $_ -isnot [string] })
 if (-not $rows.Count) { throw 'Inget resultat att exportera än. Kör ett läsrecept först.' }
 $dir = Join-Path $HOME 'Documents/Puppa'; New-Item -ItemType Directory -Force -Path $dir | Out-Null

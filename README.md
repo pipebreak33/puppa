@@ -119,7 +119,8 @@ Parametrarna blir variabler (`$Team`). I standardvärden och skript fungerar `{t
 
 ## Teknik
 
-En Python-fil (bara standardbiblioteket, 3.8+) plus recepten som `.ps1`. En långlivad `pwsh`-process kör recepten,
-så inloggningarna lever mellan körningarna. Tangenter läses med `msvcrt` på Windows och `termios` på macOS/Linux.
+En Python-fil (bara standardbiblioteket, 3.8+) plus recepten som `.ps1`. Långlivade `pwsh`-processer kör recepten,
+så inloggningarna lever mellan körningarna. PnP körs i en egen process, eftersom PnP.PowerShell och
+ExchangeOnlineManagement laddar olika versioner av MSAL och kraschar i samma process ("Method not found … WithBroker"). Tangenter läses med `msvcrt` på Windows och `termios` på macOS/Linux.
 Layouten skalar med terminalen: inga rader radbryts, smal layout under 58 kolumner, maskoten döljs under 44, och allt
 ritas om när fönstret ändrar storlek (även på Windows, där SIGWINCH saknas).

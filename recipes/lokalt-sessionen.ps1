@@ -3,11 +3,10 @@ namn:        Vad är jag ansluten till?
 kategori:    Lokalt
 typ:         läs
 kräver:      ingen
-beskrivning: Visar PnP-, Exchange-, Teams- och Graph-anslutningarna i Puppas PowerShell-session.
+beskrivning: Visar Exchange- och Graph-anslutningarna i Puppas PowerShell-session (PnP syns på statusraden).
 #>
-$rader = @()
-try { $c = Get-PnPConnection -ErrorAction Stop; $rader += [pscustomobject]@{ Tjänst = 'PnP'; Konto = "$($c.ConnectionType)"; Mål = $c.Url } }
-catch { $rader += [pscustomobject]@{ Tjänst = 'PnP'; Konto = '–'; Mål = 'inte ansluten' } }
+# PnP körs i en egen PowerShell-process (annars krockar MSAL-versionerna) – dess status syns på Puppas statusrad.
+$rader = @([pscustomobject]@{ Tjänst = 'PnP'; Konto = '–'; Mål = 'egen process – se statusraden i Puppa' })
 $exo = if (Get-Command Get-ConnectionInformation -ErrorAction SilentlyContinue) { Get-ConnectionInformation | Select-Object -First 1 }
 $rader += [pscustomobject]@{ Tjänst = 'Exchange'; Konto = if ($exo) { $exo.UserPrincipalName } else { '–' }; Mål = if ($exo) { $exo.TenantID } else { 'inte ansluten' } }
 $mg = if (Get-Command Get-MgContext -ErrorAction SilentlyContinue) { Get-MgContext }
