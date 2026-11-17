@@ -1,5 +1,9 @@
 # Puppa
 
+<p align="center">
+  <img src="assets/puppa.svg" alt="Puppa: Hej! Jag är Puppa." width="720">
+</p>
+
 Vanliga M365-adminuppgifter i PowerShell med några knapptryck, i stället för att skriva cmdlets.
 Fungerar likadant på **Windows, macOS och Linux**. Syskon till [uppa](https://github.com/pipebreak33/uppa).
 Maskoten är ett P med ögon: den föreslår nästa steg, blinkar och tittar runt medan något körs,
