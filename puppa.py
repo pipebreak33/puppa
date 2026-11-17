@@ -40,7 +40,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 HOME = Path.home()
 DIR = Path(os.environ.get("PUPPA_DIR") or HOME / ".puppa")
 os.environ["PUPPA_DIR"] = str(DIR)
@@ -694,11 +694,24 @@ def confirm(question, default=False):
 
 
 def pause():
+    """Vänta på enter (eller esc/q) innan skärmen töms. Läser tangenter rått så att piltangenter inte syns som ^[[A."""
     if ITTY:
+        print()
+        sys.stdout.write(dim("   enter = tillbaka till menyn "))
+        sys.stdout.flush()
+        kb = Keys()
         try:
-            print()
-            input(dim("   enter = tillbaka till menyn "))
-        except (EOFError, KeyboardInterrupt):
+            kb.__enter__()
+            while True:
+                ch = kb.read(0.5)
+                if ch is None:
+                    continue
+                if ch in ("\r", "\n", "\x1b", "q", "\x03", "\x04", " "):
+                    break
+        except KeyboardInterrupt:
+            pass
+        finally:
+            kb.__exit__()
             print()
 
 
@@ -1102,6 +1115,8 @@ class Worker:
                     ok, _, n = text.partition(" ")
                     return ok == "1", int(n or 0)
                 on_event(kind, text)
+            elif ln.startswith(("#< CLIXML", "<Objs ")):
+                continue                 # förloppsdata som pwsh skriver till stderr (CLIXML) – inget att visa
             else:
                 on_event("H", ln)
 
@@ -1272,7 +1287,7 @@ def print_output(lines, max_lines=None, quiet_host=False):
     for l in body[:limit]:
         out("  " + l)
     if len(body) > limit:
-        out(dim(f"  … +{len(body) - limit} rader. Kör receptet 'Exportera till Excel' för allt."))
+        out(dim(f"  … +{len(body) - limit} rader. Välj 'Exportera till Excel' nedan för att få allt."))
     for k, t in lines:
         if k == "E":
             for i, l in enumerate(wrap(t, w - 8, 5)):
@@ -1820,15 +1835,34 @@ def run_recipe(r, given=None, yes=False):
     print()
     if ok:
         word = f"{n} rader" if n != 1 else "1 rad"
-        tip = " Vill du ha det i Excel? Välj 'Exportera senaste resultat till Excel'." if n > 1 and \
-            "excel" not in r.id else ""
         if r.writes:
             celebrate("Klart! Ändringen är gjord.")
         else:
-            say(f"Klart! {word}.{tip}" if n else "Klart!", "proud")
+            say(f"Klart! {word}." if n else "Klart!", "proud")
+            if n > 1 and r.category != "Excel" and ITTY and not DRY:
+                offer_export(r, t)
     else:
         say("Det gick inte hela vägen. Felet står ovanför i rött.", "sad")
     return ok
+
+
+def offer_export(r, t):
+    """Efter ett läsrecept med flera rader: exportera direkt, eller tillbaka."""
+    global DIRTY
+    try:
+        v = choose([dict(label="Tillbaka till menyn", value="back"),
+                    dict(label="Exportera till Excel", hint="formaterad .xlsx i ~/Documents/Puppa", value="excel-exportera", key="x"),
+                    dict(label="Exportera till CSV", hint="semikolon, UTF-8", value="excel-csv", key="c")],
+                   title="Vad vill du göra med resultatet?", footer="↑/↓ · enter · x Excel · c CSV · q tillbaka")
+    except Cancel:
+        return
+    if v in (None, "back"):
+        DIRTY = False            # användaren har redan sett resultatet – ingen extra paus
+        return
+    ex = find_recipe(v)
+    if ex:
+        name = slug(f"{(t or {}).get('name', 'puppa')}-{r.id}-{datetime.now():%Y-%m-%d}")
+        run_recipe(ex, given={"Filnamn": name, "Oppna": "Ja"}, yes=True)
 
 
 RECIPE_TEMPLATE = """<#PUPPA
