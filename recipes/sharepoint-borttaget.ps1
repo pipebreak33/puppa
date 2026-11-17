@@ -101,7 +101,9 @@ Write-Host "$($borta.Count) borttagningar av $(@($perPerson).Count) personer de 
 foreach ($p in $perPerson | Select-Object -First 5) { Write-Host ("  {0,4} st  {1}" -f $p.Totalt, $p.'Borttaget av') }
 
 if ($Excel -eq 'Ja') {
-    $WarningPreference = 'SilentlyContinue'   # ImportExcel varnar om autosize på macOS/Linux
+    # ImportExcel varnar om autosize på macOS/Linux. Modulfunktioner ser bara den globala inställningen.
+    $tidigare = $global:WarningPreference; $global:WarningPreference = 'SilentlyContinue'
+    try {
     Import-Module ImportExcel -ErrorAction Stop
     $dir = Join-Path $HOME 'Documents/Puppa'
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -143,6 +145,7 @@ if ($Excel -eq 'Ja') {
     foreach ($c in 1..3) { $ws.Column($c).Width = @(14, 10, 90)[$c - 1] }
     $pkg.Workbook.Worksheets['Sammanfattning'].Select()
     Close-ExcelPackage $pkg
+    } finally { $global:WarningPreference = $tidigare }
     Write-Host "Excel-rapport: $path"
     Invoke-Item -LiteralPath $path
 }

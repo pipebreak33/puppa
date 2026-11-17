@@ -48,7 +48,11 @@ MicrosoftTeams, Microsoft.Graph, ImportExcel, Microsoft.PowerShell.SecretManagem
   (PnP i namnet, eller publik klient med SharePoint-rättigheter) – eller så klistrar du in ClientId. Inget skapas i tenanten utan att du svarar **j**.
 - **Du ser alltid kommandot** som körs. Recept märkta **ändrar** kräver ett **j**, och Puppa loggar in först så att
   du ser vilken tenant ändringen hamnar i. **läs**-recept körs direkt.
-- **Exportera** förra resultatet till Excel (ImportExcel) eller CSV (semikolon, UTF-8) i `~/Documents/Puppa/`.
+- **Excel-rapport av allt.** Efter varje läsrecept väljer du **Exportera till Excel** (`x`) eller **CSV** (`c`).
+  Rapporten (`~/Documents/Puppa/tenant-recept-datum.xlsx`) har en sammanfattning med receptets namn, tenant,
+  dina val, antal rader och period, sammanställningar per kolumn som upprepar sig (per person, typ, sajt,
+  händelse …) med antal och andel, ett blad per dag när det finns tider, och resultatet som filtrerbar tabell
+  med låst rubrikrad, datumformat och klickbara länkar. Utan meny: `puppa kör RECEPT … --excel` (eller `--csv`).
 - **Ingen nyckelringsfråga.** På macOS sparar Puppa som standard inte inloggningarna i nyckelringen (Graph
   `-ContextScope Process`, PnP utan `-PersistLogin`), så en osignerad Homebrew-`pwsh` inte frågar varje gång.
   Du loggar in en gång per körning. Slå på **Kom ihåg inloggningar** under *Logga in…* om du vill spara dem.
@@ -65,7 +69,7 @@ MicrosoftTeams, Microsoft.Graph, ImportExcel, Microsoft.PowerShell.SecretManagem
 | `puppa pnp [TENANT]` | ny PnP-appregistrering (eller ange ClientId) |
 | `puppa test [TENANT]` · `puppa skal [TENANT]` | testa PnP / pwsh-skal som redan kört `Connect-PnPOnline` |
 | `puppa recept` | lista alla recept |
-| `puppa kör RECEPT Namn=värde … [--ja]` | kör ett recept utan meny |
+| `puppa kör RECEPT Namn=värde … [--ja] [--excel\|--csv]` | kör ett recept utan meny, ev. direkt till Excel/CSV |
 | `puppa logga-ut` | logga ut från allt |
 | `-n` / `--torr` | visa kommandona, kör ingenting |
 | `--no-anim` | inga animationer (stängs också av av `NO_COLOR` och när utdata pipas) |

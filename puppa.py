@@ -9,7 +9,8 @@
   puppa test [KUND]        testa PnP-anslutningen
   puppa skal [KUND]        pwsh-skal som redan kört Connect-PnPOnline
   puppa recept             lista recept
-  puppa kör RECEPT [Namn=värde …] [--ja]   kör ett recept (frågar efter det som saknas)
+  puppa kör RECEPT [Namn=värde …] [--ja] [--excel|--csv]   kör ett recept (frågar efter det som saknas),
+                           --excel/--csv sparar resultatet som rapport i ~/Documents/Puppa
   puppa logga-ut           logga ut från PnP, Exchange, Teams och Graph (rensar sparade inloggningar)
   puppa hej
 
@@ -40,7 +41,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.2.2"
+VERSION = "1.3.0"
 HOME = Path.home()
 DIR = Path(os.environ.get("PUPPA_DIR") or HOME / ".puppa")
 os.environ["PUPPA_DIR"] = str(DIR)
@@ -137,6 +138,7 @@ ITTY = sys.stdin.isatty()
 COLOR = TTY and "NO_COLOR" not in os.environ
 ANIM = TTY and COLOR and not os.environ.get("PUPPA_NO_ANIM") and not os.environ.get("CI")
 DRY = False
+EXPORT_NOW = None  # puppa kör … --excel/--csv: exportera resultatet direkt
 DIRTY = False      # något har skrivits ut som användaren bör hinna läsa innan skärmen töms
 
 
@@ -1839,14 +1841,17 @@ def run_recipe(r, given=None, yes=False):
             celebrate("Klart! Ändringen är gjord.")
         else:
             say(f"Klart! {word}." if n else "Klart!", "proud")
-            if n > 1 and r.category != "Excel" and ITTY and not DRY:
-                offer_export(r, t)
+            if n and r.category != "Excel" and not DRY:
+                if EXPORT_NOW:
+                    export_result(r, t, vals, EXPORT_NOW, open_=False)
+                elif n > 1 and ITTY:
+                    offer_export(r, t, vals)
     else:
         say("Det gick inte hela vägen. Felet står ovanför i rött.", "sad")
     return ok
 
 
-def offer_export(r, t):
+def offer_export(r, t, vals=None):
     """Efter ett läsrecept med flera rader: exportera direkt, eller tillbaka."""
     global DIRTY
     try:
@@ -1859,10 +1864,19 @@ def offer_export(r, t):
     if v in (None, "back"):
         DIRTY = False            # användaren har redan sett resultatet – ingen extra paus
         return
-    ex = find_recipe(v)
-    if ex:
-        name = slug(f"{(t or {}).get('name', 'puppa')}-{r.id}-{datetime.now():%Y-%m-%d}")
-        run_recipe(ex, given={"Filnamn": name, "Oppna": "Ja"}, yes=True)
+    export_result(r, t, vals, v)
+
+
+def export_result(r, t, vals, how="excel-exportera", open_=True):
+    """Kör Excel- eller CSV-receptet på resultatet nyss, med receptets namn, tenant och val i rapporten."""
+    ex = find_recipe(how)
+    if not ex:
+        return False
+    name = slug(f"{(t or {}).get('name', 'puppa')}-{r.id}-{datetime.now():%Y-%m-%d}")
+    det = [f"Tenant: {t['name']}" + (f" ({t['tenant']})" if t.get("tenant") else "")] if t else []
+    det += [f"{k}: {v}" for k, v in (vals or {}).items() if str(v).strip()]
+    return run_recipe(ex, given={"Filnamn": name, "Oppna": "Ja" if open_ else "Nej", "Rubrik": r.name,
+                                 "Detaljer": " · ".join(det).replace("{", "(").replace("}", ")")}, yes=True)
 
 
 RECIPE_TEMPLATE = """<#PUPPA
@@ -2719,6 +2733,8 @@ def main(argv=None):
     k.add_argument("recept")
     k.add_argument("par", nargs="*", help="Namn=värde")
     k.add_argument("--ja", action="store_true", help="bekräfta ändrande recept utan att fråga")
+    k.add_argument("--excel", action="store_true", help="spara resultatet som Excel-rapport i ~/Documents/Puppa")
+    k.add_argument("--csv", action="store_true", help="spara resultatet som CSV i ~/Documents/Puppa")
     sub.add_parser("logga-ut", aliases=["logout"], help="logga ut från PnP, Exchange, Teams och Graph")
     sub.add_parser("hej")
     a = ap.parse_args(rest)
@@ -2777,6 +2793,8 @@ def main(argv=None):
                     f"Hittar inget recept som heter {a.recept}. Se puppa recept.", "worry" if hits else "sad")
                 return 1
             given = dict(x.split("=", 1) for x in a.par if "=" in x)
+            global EXPORT_NOW
+            EXPORT_NOW = "excel-exportera" if a.excel else "excel-csv" if a.csv else None
             WORKER.warm()
             return 0 if run_recipe(r, given, yes=a.ja) else 1
         if a.cmd in ("logga-ut", "logout"):
