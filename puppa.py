@@ -40,7 +40,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 HOME = Path.home()
 DIR = Path(os.environ.get("PUPPA_DIR") or HOME / ".puppa")
 os.environ["PUPPA_DIR"] = str(DIR)
