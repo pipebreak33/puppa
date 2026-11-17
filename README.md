@@ -5,7 +5,7 @@
 </p>
 
 Vanliga M365-adminuppgifter i PowerShell med några knapptryck, i stället för att skriva cmdlets.
-Fungerar likadant på **Windows, macOS och Linux**. Syskon till [uppa](https://github.com/pipebreak33/uppa).
+Fungerar likadant på **Windows, macOS och Linux**. Kusin till [uppa](https://github.com/pipebreak33/uppa).
 Maskoten är ett P med ögon: den föreslår nästa steg, blinkar och tittar runt medan något körs,
 blir glad när det gick bra och ledsen vid fel.
 
