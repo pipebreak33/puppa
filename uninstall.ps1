@@ -1,0 +1,49 @@
+<#
+ Avinstallera Puppa på Windows (fungerar även i pwsh på macOS/Linux):
+   irm https://raw.githubusercontent.com/pipebreak33/puppa/main/uninstall.ps1 | iex
+ Från en lokal kopia:  ./uninstall.ps1
+
+ Tar bort programmet (~/.puppa/app), kommandot puppa och PATH-posten.
+ Behåller dina tenants, inställningar, certifikat och egna recept (~/.puppa) och rapporterna i ~/Documents/Puppa.
+ $env:PUPPA_PURGE = '1' tar bort även .puppa med dina data. $env:PUPPA_YES = '1' hoppar över frågan.
+#>
+$ErrorActionPreference = 'Stop'
+$Clock = [Diagnostics.Stopwatch]::StartNew()
+$OnWindows = ($PSVersionTable.PSEdition -ne 'Core') -or $IsWindows
+$Dir = Join-Path $HOME '.puppa'
+$Bin = Join-Path $Dir 'bin'
+$Shim = if ($OnWindows) { Join-Path $Bin 'puppa.cmd' } else { Join-Path $HOME '.local/bin/puppa' }
+
+function Say($m) { Write-Host "  P› $m" -ForegroundColor Cyan }
+function Ask($q) { $s = Read-Host "  $q [j/N]"; return ($s -match '^(j|ja|y|yes)$') }
+
+$targets = @()
+if ($env:PUPPA_PURGE -eq '1') {
+    if (Test-Path $Dir) { $targets += $Dir }
+} else {
+    foreach ($p in @('app', 'bin')) { $x = Join-Path $Dir $p; if (Test-Path $x) { $targets += $x } }
+}
+# startkommandot på macOS/Linux: bara om det är vårt (pekar på ~/.puppa)
+if (-not $OnWindows -and (Test-Path $Shim) -and ((Get-Content $Shim -Raw) -like "*/.puppa/*")) { $targets += $Shim }
+$user = if ($OnWindows) { [Environment]::GetEnvironmentVariable('Path', 'User') } else { '' }
+if (-not $user) { $user = '' }
+$inPath = ($user -split ';') -contains $Bin
+
+if (-not $targets -and -not $inPath) { Say 'Puppa är inte installerad här. Inget att ta bort.'; return }
+Write-Host "`n  Det här tas bort:"
+$targets | ForEach-Object { Write-Host "    $_" }
+if ($inPath) { Write-Host "    $Bin i din PATH" }
+if ($env:PUPPA_PURGE -ne '1') { Write-Host '  Behålls: dina tenants, inställningar, certifikat och egna recept (~/.puppa) och rapporterna i ~/Documents/Puppa.' }
+Write-Host ''
+if ($env:PUPPA_YES -ne '1') {
+    if (-not (Ask 'Avinstallera Puppa?')) { Say 'Avbrutet. Ingenting har tagits bort.'; return }
+}
+
+foreach ($t in $targets) { Remove-Item $t -Recurse -Force }
+if ($inPath) {
+    [Environment]::SetEnvironmentVariable('Path', (($user -split ';' | Where-Object { $_ -and $_ -ne $Bin }) -join ';'), 'User')
+}
+if ((Test-Path $Dir) -and -not (Get-ChildItem $Dir -Force)) { Remove-Item $Dir -Force }
+
+$Clock.Stop()
+Write-Host "`n  ✔ Puppa är avinstallerad ($([int]$Clock.Elapsed.TotalSeconds) s).`n" -ForegroundColor Green

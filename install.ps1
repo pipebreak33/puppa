@@ -11,6 +11,7 @@
    2. direkt från python.org (per användare, inga adminrättigheter).
 #>
 $ErrorActionPreference = 'Stop'
+$Clock = [Diagnostics.Stopwatch]::StartNew()
 $ProgressPreference = 'SilentlyContinue'
 if ($PSVersionTable.PSEdition -ne 'Core') {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -176,4 +177,6 @@ if ($pwsh) {
 }
 
 $ver = Invoke-Py @($target, '--version') 2>$null
-Write-Host "`n  ✔ $ver installerad. Öppna en ny terminal och kör: puppa`n" -ForegroundColor Green
+$Clock.Stop(); $took = if ($Clock.Elapsed.TotalSeconds -ge 60) { '{0} min {1} s' -f [int][math]::Floor($Clock.Elapsed.TotalMinutes), $Clock.Elapsed.Seconds } else { '{0} s' -f [int]$Clock.Elapsed.TotalSeconds }
+Write-Host "`n  ✔ $ver installerad på $took. Öppna en ny terminal och kör: puppa" -ForegroundColor Green
+Write-Host "  Avinstallera: irm https://raw.githubusercontent.com/pipebreak33/puppa/main/uninstall.ps1 | iex`n" -ForegroundColor DarkGray

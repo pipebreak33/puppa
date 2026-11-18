@@ -33,6 +33,24 @@ Styr källan med `PUPPA_REPO=ägare/repo` och `PUPPA_BRANCH=gren`. Från en loka
 Kräver PowerShell 7 (`pwsh`) och de moduler du vill använda: PnP.PowerShell 3.x, ExchangeOnlineManagement,
 MicrosoftTeams, Microsoft.Graph, ImportExcel, Microsoft.PowerShell.SecretManagement + SecretStore.
 
+
+## Avinstallera
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/pipebreak33/puppa/main/uninstall.ps1 | iex
+```
+
+**macOS / Linux:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pipebreak33/puppa/main/uninstall.sh | sh
+```
+
+Tar bort programmet och kommandot `puppa` (och PATH-posten på Windows). Det behåller dina tenants, inställningar, certifikat och egna recept i `~/.puppa`, och rapporterna i `~/Documents/Puppa`.
+`PUPPA_PURGE=1` tar bort även dina data, och `PUPPA_YES=1` hoppar över frågan.
+
 ## Så funkar det
 
 - **Ingen förberedelse.** Välj ett recept. Puppa loggar in när det behövs (Exchange, Graph, Teams) och lägger

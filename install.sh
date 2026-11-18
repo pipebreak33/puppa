@@ -5,6 +5,7 @@
 # Styr källan med PUPPA_REPO=ägare/repo och PUPPA_BRANCH=gren (eller en release-tagg).
 # Inga frågor: exitkod 0 = installerat, annat = fel.
 set -eu
+START="$(date +%s)"
 
 REPO="${PUPPA_REPO:-pipebreak33/puppa}"
 BRANCH="${PUPPA_BRANCH:-main}"
@@ -106,4 +107,6 @@ else
 fi
 
 VER="$("$PY" "$APP/puppa.py" --version 2>/dev/null || echo puppa)"
-printf '\n  \033[38;5;42m✔\033[0m %s installerad. Kör: \033[1mpuppa\033[0m\n\n' "$VER"
+SECS=$(( $(date +%s) - START )); if [ "$SECS" -ge 60 ]; then TOOK="$((SECS / 60)) min $((SECS % 60)) s"; else TOOK="$SECS s"; fi
+printf '\n  \033[38;5;42m✔\033[0m %s installerad på %s. Kör: \033[1mpuppa\033[0m\n' "$VER" "$TOOK"
+printf '  \033[2mAvinstallera: curl -fsSL https://raw.githubusercontent.com/pipebreak33/puppa/main/uninstall.sh | sh\033[0m\n\n'
