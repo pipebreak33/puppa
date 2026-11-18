@@ -59,6 +59,15 @@ MicrosoftTeams, Microsoft.Graph, ImportExcel, Microsoft.PowerShell.SecretManagem
 - **Logga ut…** från allt (förvalt) eller en tjänst i taget. Rensar även sparade inloggningar
   (PnP `-ClearPersistedLogin`, Graph-token). Puppa frågar också när du avslutar.
 
+## Användare
+
+**Användare…** i menyn (eller `puppa användare`) listar alla användare i tenanten du är inloggad i. Skriv för att
+fuzzy-söka på namn, e-post, titel eller avdelning (`ann`, `ekon` och `asv` hittar alla Anna Svensson på Ekonomi).
+Mellanslag eller tab kryssar, ctrl+a kryssar alla som syns, enter är klar. Sedan visas vad du kan göra med de valda:
+alla recept som tar en användare, till exempel lägga till i grupp eller team, spärra inloggning, visa MFA-metoder,
+inloggningar, enheter och gruppmedlemskap. Recept som tar flera användare körs en gång för alla. Övriga körs en gång
+per person: fälten frågas en gång och en ändring bekräftas en gång. Nya recept med `@user` dyker upp här av sig själva.
+
 ## Kommandon
 
 | | |
@@ -69,6 +78,8 @@ MicrosoftTeams, Microsoft.Graph, ImportExcel, Microsoft.PowerShell.SecretManagem
 | `puppa pnp [TENANT]` | ny PnP-appregistrering (eller ange ClientId) |
 | `puppa test [TENANT]` · `puppa skal [TENANT]` | testa PnP / pwsh-skal som redan kört `Connect-PnPOnline` |
 | `puppa recept` | lista alla recept |
+| `puppa användare [UPN …]` | välj användare (fuzzy-sök, flerval) och gör något med dem |
+| `puppa uppslag TYP [SÖK] [--alla] [--json]` | sök i tenanten: `user`, `group`, `mailbox`, `site`, `team` … (`--alla` = alla användare, `--json` för andra program, t.ex. Ruppa och Muppa) |
 | `puppa kör RECEPT Namn=värde … [--ja] [--excel\|--csv]` | kör ett recept utan meny, ev. direkt till Excel/CSV |
 | `puppa logga-ut` | logga ut från allt |
 | `-n` / `--torr` | visa kommandona, kör ingenting |

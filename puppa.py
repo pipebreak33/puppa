@@ -41,7 +41,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 HOME = Path.home()
 DIR = Path(os.environ.get("PUPPA_DIR") or HOME / ".puppa")
 os.environ["PUPPA_DIR"] = str(DIR)
@@ -1542,7 +1542,15 @@ Get-MgApplication @p | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{1}|{0} · s
 $pnp | ForEach-Object { Write-Host ('PUPPA-PICK|{0}|{1}|{0} · skapad {2:yyyy-MM-dd}' -f $_.AppId, $_.DisplayName, $_.CreatedDateTime) }
 """),
 }
-LIST_ALL = {"site", "team", "sku", "pnpapp"}          # hämtas en gång per session och filtreras här i Puppa
+LOOKUPS["alluser"] = ("graph:User.Read.All", "användare", r"""
+Get-MgUser -All -PageSize 999 -Property 'displayName,userPrincipalName,accountEnabled,userType,jobTitle,department' |
+    Sort-Object DisplayName | ForEach-Object {
+    $d = @($_.UserPrincipalName, $_.JobTitle, $_.Department) | Where-Object { $_ }
+    if ($_.UserType -eq 'Guest') { $d += 'gäst' }
+    if (-not $_.AccountEnabled) { $d += 'avstängd' }
+    Write-Host ('PUPPA-PICK|{0}|{1}|{2}' -f $_.UserPrincipalName, $_.DisplayName, ($d -join ' · ')) }
+""")
+LIST_ALL = {"site", "team", "sku", "pnpapp", "alluser"}          # hämtas en gång per session och filtreras här i Puppa
 LOOKUP_CACHE = {}
 
 
@@ -1636,6 +1644,208 @@ def lookup_param(prm, t, default):
         if not many or not confirm("Lägg till fler?", False):
             break
     return t, ",".join(chosen)
+
+
+def pick_many(items, title, chosen=None):
+    """Lista med kryssrutor och fuzzy-sök. items: [(värde, namn, detalj)]. -> [värden] (tom = avbrutet).
+    Skriv för att söka · mellanslag/tab kryssar · ctrl+a kryssar alla som syns · enter klar · esc rensar/avbryter."""
+    if not ITTY:
+        raise Cancel()
+    chosen = list(chosen or [])
+    st = {"q": "", "pos": 0, "top": 0}
+
+    def view():
+        return fuzzy_rank(st["q"], items, lambda x: f"{x[1]} {x[0]} {x[2]}") if st["q"].strip() else list(items)
+
+    vis = view()
+    live = Live()
+
+    def draw():
+        w = width()
+        lines = [""]
+        if st["q"]:
+            lines.append("  " + accent("⌕ ") + bold(st["q"]) + accent("▏") + dim(f"  {len(vis)} träffar"))
+        else:
+            lines.append("  " + accent("▍") + bold(title) + dim(f"  {len(items)} st · skriv för att söka"))
+        lines.append("  " + (green(f"{len(chosen)} valda: ") + cut(", ".join(
+            next((i[1] for i in items if i[0] == v), v) for v in chosen), w - 16) if chosen else dim("Inga valda än.")))
+        lines.append("")
+        room = max(3, height() - len(lines) - 4)
+        pos = min(st["pos"], max(0, len(vis) - 1))
+        top = min(max(st["top"], pos - room + 1), pos)
+        st["top"], st["pos"] = top, pos
+        if not vis:
+            lines.append("     " + dim("Inga träffar. Backsteg ändrar, esc rensar."))
+        if top > 0:
+            lines.append(dim("     ↑ fler"))
+        nw = min(max([len(v[1]) for v in vis[top:top + room]] or [10]) + 2, max(12, w // 2 - 6))
+        for k in range(top, min(len(vis), top + room)):
+            v = vis[k]
+            on = k == pos
+            mark = green("◉") if v[0] in chosen else dim("○")
+            name = cut(v[1] or v[0], nw - 1)
+            line = f"   {accent('❯') if on else ' '} {mark} " + pad(bold(accent(name)) if on else name, nw)
+            if w >= 64:
+                line += dim(v[2] or v[0])
+            lines.append(line)
+        if top + room < len(vis):
+            lines.append(dim("     ↓ fler"))
+        lines.append("")
+        lines.append(dim("   " + ("mellanslag/tab kryssar · ctrl+a alla som syns · enter klar · esc avbryter"
+                                  if w >= 80 else "tab kryssar · enter klar · esc")))
+        live.draw(lines)
+
+    kb = Keys()
+    done = False
+    try:
+        kb.__enter__()
+        draw()
+        size = shutil.get_terminal_size((100, 30))
+        while True:
+            ch = kb.read(0.12)
+            if ch is None:
+                if shutil.get_terminal_size((100, 30)) != size:
+                    size = shutil.get_terminal_size((100, 30))
+                    draw()
+                continue
+            if ch in ("\x1b[A", "\x1bOA"):
+                st["pos"] = max(0, st["pos"] - 1)
+            elif ch in ("\x1b[B", "\x1bOB"):
+                st["pos"] = min(max(0, len(vis) - 1), st["pos"] + 1)
+            elif ch in ("\x1b[5~",):
+                st["pos"] = max(0, st["pos"] - 10)
+            elif ch in ("\x1b[6~",):
+                st["pos"] = min(max(0, len(vis) - 1), st["pos"] + 10)
+            elif ch == "\t" or (ch == " " and not st["q"]):
+                if vis:
+                    v = vis[st["pos"]][0]
+                    chosen.remove(v) if v in chosen else chosen.append(v)
+                    st["pos"] = min(len(vis) - 1, st["pos"] + 1)
+            elif ch == "\x01":
+                for v in vis:
+                    if v[0] not in chosen:
+                        chosen.append(v[0])
+            elif ch in ("\r", "\n"):
+                if not chosen and vis:
+                    chosen.append(vis[st["pos"]][0])
+                done = True
+                break
+            elif ch in ("\x7f", "\x08"):
+                st["q"] = st["q"][:-1]
+                vis, st["pos"], st["top"] = view(), 0, 0
+            elif ch == "\x1b":
+                if st["q"]:
+                    st["q"] = ""
+                    vis, st["pos"], st["top"] = view(), 0, 0
+                else:
+                    break
+            elif ch in ("\x03", "\x04"):
+                break
+            elif ch.isprintable() and not ch.startswith("\x1b"):
+                st["q"] += ch
+                vis, st["pos"], st["top"] = view(), 0, 0
+            draw()
+    finally:
+        kb.__exit__()
+        live.clear()
+    return chosen if done else []
+
+
+def user_actions(rs=None):
+    """Recept som tar en användare: [(recept, parameter)]. Läsande först, sedan ändrande."""
+    rs = rs or load_recipes()
+    hits = []
+    for r in rs:
+        for prm in r.params:
+            if prm.lookup.rstrip("+") in ("user", "spuser"):
+                hits.append((r, prm))
+                break
+    return sorted(hits, key=lambda x: (x[0].writes, x[0].category, x[0].name))
+
+
+def users_menu(preselected=None):
+    """Användare…: lista tenantens användare, välj en eller flera, gör något med dem."""
+    t = active_tenant()
+    if preselected:
+        chosen = list(preselected)
+    else:
+        t, users = run_lookup("alluser", t, "")
+        if users is None:
+            say("Kunde inte hämta användarna. Logga in i Graph först (Logga in…).", "sad")
+            return
+        if not users:
+            say("Hittade inga användare i tenanten.", "worry")
+            return
+        new_screen()
+        chosen = pick_many(users, f"Användare i {t['name']}" if t else "Användare")
+        if not chosen:
+            return
+    names = ", ".join(chosen[:3]) + (f" och {len(chosen) - 3} till" if len(chosen) > 3 else "")
+    acts = user_actions()
+    rows = []
+    cat = None
+    for r, prm in acts:
+        head = "Ändra" if r.writes else "Visa"
+        if head != cat:
+            rows.append(("head", head))
+            cat = head
+        rows.append(dict(label=r.name, hint=r.category + (" · alla på en gång" if prm.lookup.endswith("+") else ""),
+                         value=r.id, badge=r.badge()))
+    v = choose(rows, title=f"Vad vill du göra med {names}?", screen=True,
+               footer="↑/↓ · enter väljer · skriv för att söka · q tillbaka")
+    if not v:
+        return
+    r, prm = next(x for x in acts if x[0].id == v)
+    remember_recipe(r.id)
+    if prm.lookup.endswith("+") or len(chosen) == 1:
+        run_recipe(r, {prm.name: ",".join(chosen)})
+        pause()
+        return
+    # en körning per användare: övriga fält frågas en gång, och en ändring bekräftas en gång
+    vals = {}
+    ok_all, yes = 0, False
+    for n, upn in enumerate(chosen, 1):
+        out("  " + accent(f"{n}/{len(chosen)}") + "  " + bold(upn))
+        ok = run_recipe(r, {**vals, prm.name: upn}, yes=yes, out_vals=vals)
+        ok_all += bool(ok)
+        if r.writes and ok:
+            yes = True
+        if not ok and r.writes and not yes:
+            break
+    say(f"Klart med {ok_all} av {len(chosen)} användare.", "proud" if ok_all == len(chosen) else "worry")
+    pause()
+
+
+def cmd_lookup(kind, query, as_json, all_):
+    """puppa uppslag TYP [sök]: sök i tenanten (samma uppslag som recepten använder). --json för Ruppa."""
+    if all_ and kind == "user":
+        kind = "alluser"
+    if kind not in LOOKUPS:
+        msg = f"okänt uppslag '{kind}' (finns: {', '.join(k for k in LOOKUPS if k != 'alluser')})"
+        if as_json:
+            print(json.dumps({"ok": False, "error": msg, "items": []}, ensure_ascii=False))
+        else:
+            say(msg, "worry")
+        return False
+    real_stdout = sys.stdout
+    if as_json:
+        sys.stdout = sys.stderr          # inloggning och förlopp syns i terminalen, stdout är bara JSON
+    try:
+        t, hits = run_lookup(kind, active_tenant(), query or "")
+    finally:
+        sys.stdout = real_stdout
+    if hits is None:
+        if as_json:
+            print(json.dumps({"ok": False, "error": "kunde inte söka (inloggad?)", "items": []}, ensure_ascii=False))
+        return False
+    if as_json:
+        print(json.dumps({"ok": True, "tenant": (t or {}).get("name", ""),
+                          "items": [{"value": v, "name": n, "detail": d} for v, n, d in hits]}, ensure_ascii=False))
+    else:
+        w = width()
+        for v, n, d in hits:
+            out(fit(f"  {bold(n)}  {dim(d or v)}", w))
+    return True
 
 
 # ───────────────────────────── recept ─────────────────────────────
@@ -1783,7 +1993,7 @@ def build_script(r, vals, p=None):
     return (head + "\n" if head else "") + fill(r.body, placeholders(p))
 
 
-def run_recipe(r, given=None, yes=False):
+def run_recipe(r, given=None, yes=False, out_vals=None):
     t = active_tenant()
     needs = r.needs_list()
     w = width()
@@ -1797,6 +2007,8 @@ def run_recipe(r, given=None, yes=False):
             return False
     try:
         vals, t = collect_params(r, t, given or {})
+        if out_vals is not None:
+            out_vals.update({k: v for k, v in vals.items() if k not in (given or {})})
     except Cancel as e:
         if e.args:
             out(red("  " + e.args[0]))
@@ -2625,6 +2837,8 @@ def main_menu():
                      (f"{len(ts)} sparade – välj vilken du jobbar i" if ts else "listan fylls på när du loggar in"),
                      value="tenants", key="t"),
                 dict(label="Recept…", hint="kör en uppgift: lista, skapa, exportera", value="recipes"),
+                dict(label="Användare…", hint="välj en eller flera i tenanten och gör något med dem", value="users",
+                     key="a"),
                 dict(label="Logga in…", hint="Exchange · Graph · Teams · SharePoint (PnP)", value="connect"),
                 dict(label="Ny PnP-appregistrering", hint="behövs bara för SharePoint-recept", value="pnp")]
         if t and t.get("client_id"):
@@ -2652,6 +2866,8 @@ def main_menu():
                 run_recipe_by_value(v)
             elif v == "recipes":
                 recipes_menu()
+            elif v == "users":
+                users_menu()
             elif v == "tenants":
                 tenants_menu()
             elif v == "pnp":
@@ -2729,6 +2945,13 @@ def main(argv=None):
     s = sub.add_parser("skal", aliases=["shell"], help="öppna anslutet pwsh-skal (PnP)")
     s.add_argument("namn", nargs="?")
     sub.add_parser("recept", help="lista recept")
+    an = sub.add_parser("användare", aliases=["anvandare", "users"], help="välj användare och gör något med dem")
+    an.add_argument("upn", nargs="*", help="hoppa över listan: de här användarna")
+    up = sub.add_parser("uppslag", aliases=["lookup"], help="sök i tenanten: user, group, mailbox, site …")
+    up.add_argument("typ")
+    up.add_argument("sok", nargs="?", default="")
+    up.add_argument("--json", action="store_true", help="maskinläsbart (för Ruppa)")
+    up.add_argument("--alla", action="store_true", help="user: alla användare i tenanten")
     k = sub.add_parser("kör", aliases=["kor", "run"], help="kör ett recept")
     k.add_argument("recept")
     k.add_argument("par", nargs="*", help="Namn=värde")
@@ -2785,6 +3008,15 @@ def main(argv=None):
         if a.cmd == "recept":
             list_recipes()
             return 0
+        if a.cmd in ("användare", "anvandare", "users"):
+            if not ITTY:
+                sys.exit("  behöver en riktig terminal (eller: puppa kör RECEPT Anvandare=…)")
+            WORKER.warm()
+            users_menu(a.upn or None)
+            return 0
+        if a.cmd in ("uppslag", "lookup"):
+            WORKER.warm()
+            return 0 if cmd_lookup(a.typ, a.sok, a.json, a.alla) else 1
         if a.cmd in ("kör", "kor", "run"):
             r = find_recipe(a.recept)
             if not r:
