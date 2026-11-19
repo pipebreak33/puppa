@@ -10,7 +10,7 @@ param:       Text? | Svarstext (krävs för På) |
 #>
 if ($Lage -eq 'Av') { Set-MailboxAutoReplyConfiguration -Identity $Postlada -AutoReplyState Disabled -ErrorAction Stop }
 else {
-    if (-not $Text) { throw 'Ange en svarstext.' }
+    if (-not $Text) { throw (T 'Enter a reply text.' 'Ange en svarstext.') }
     Set-MailboxAutoReplyConfiguration -Identity $Postlada -AutoReplyState Enabled -InternalMessage $Text -ExternalMessage $Text -ExternalAudience All -ErrorAction Stop
 }
 Get-MailboxAutoReplyConfiguration -Identity $Postlada | Select-Object Identity, AutoReplyState

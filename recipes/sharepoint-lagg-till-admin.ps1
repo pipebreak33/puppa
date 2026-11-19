@@ -9,4 +9,4 @@ param:       Anvandare | Användare (UPN, flera med komma) | {upn} | @spuser+
 #>
 $lista = @($Anvandare -split '[,;\s]+' | Where-Object { $_ })
 Set-PnPTenantSite -Identity $Url -Owners $lista -ErrorAction Stop
-Write-Host "Lade till: $($lista -join ', ')"
+Write-Host (T "Added: $($lista -join ', ')" "Lade till: $($lista -join ', ')")

@@ -9,7 +9,7 @@ param:       Anvandare | Användare (UPN, flera med komma) | | @user+
 param:       Roll | Roll | Member | Member,Owner
 #>
 $t = @(Get-Team -DisplayName $Team)
-if ($t.Count -ne 1) { throw "Hittade $($t.Count) team som heter '$Team'." }
+if ($t.Count -ne 1) { throw (T "Found $($t.Count) teams called '$Team'." "Hittade $($t.Count) team som heter '$Team'.") }
 $t = $t[0]
 
 foreach ($a in @($Anvandare -split '[,;\s]+' | Where-Object { $_ })) {

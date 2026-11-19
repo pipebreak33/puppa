@@ -9,7 +9,7 @@ param:       Grupp | Gruppens namn eller e-post | | @group
 $q = $Grupp -replace "'", "''"
 $g = @(Get-MgGroup -Filter "displayName eq '$q' or mail eq '$q'" -All)
 if (-not $g) { $g = @(Get-MgGroup -Search "displayName:$Grupp" -ConsistencyLevel eventual -All) }
-if ($g.Count -ne 1) { throw "Hittade $($g.Count) grupper för '$Grupp': $(($g.DisplayName | Select-Object -First 5) -join ', ')" }
+if ($g.Count -ne 1) { throw (T "Found $($g.Count) groups for '$Grupp': $(($g.DisplayName | Select-Object -First 5) -join ', ')" "Hittade $($g.Count) grupper för '$Grupp': $(($g.DisplayName | Select-Object -First 5) -join ', ')") }
 $g = $g[0]
 
 Write-Host "$($g.DisplayName)"

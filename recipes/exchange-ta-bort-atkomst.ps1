@@ -10,5 +10,5 @@ param:       Anvandare | Vems åtkomst ska bort? (UPN) | | @recipient
 Remove-MailboxPermission -Identity $Postlada -User $Anvandare -AccessRights FullAccess -InheritanceType All -Confirm:$false -ErrorAction SilentlyContinue
 Remove-RecipientPermission -Identity $Postlada -Trustee $Anvandare -AccessRights SendAs -Confirm:$false -ErrorAction SilentlyContinue
 Set-Mailbox -Identity $Postlada -GrantSendOnBehalfTo @{ Remove = $Anvandare } -ErrorAction SilentlyContinue
-Write-Host "Klart. Kvarvarande åtkomst:"
+Write-Host (T "Done. Remaining access:" "Klart. Kvarvarande åtkomst:")
 Get-EXOMailboxPermission -Identity $Postlada | Where-Object { $_.User -notlike 'NT AUTHORITY*' -and -not $_.IsInherited } | Select-Object User, AccessRights

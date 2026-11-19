@@ -15,6 +15,6 @@ if ($SkickatSparas -eq 'Ja') { Set-Mailbox -Identity $mb.Identity -MessageCopyFo
 foreach ($m in @($Medlemmar -split '[,;\s]+' | Where-Object { $_ })) {
     Add-MailboxPermission -Identity $Adress -User $m -AccessRights FullAccess -InheritanceType All -AutoMapping $true -Confirm:$false | Out-Null
     Add-RecipientPermission -Identity $Adress -Trustee $m -AccessRights SendAs -Confirm:$false | Out-Null
-    Write-Host "  + $m (fullbehörighet + skicka som)"
+    Write-Host (T "  + $m (full access + send as)" "  + $m (fullbehörighet + skicka som)")
 }
 Get-EXOMailbox -Identity $Adress | Select-Object DisplayName, PrimarySmtpAddress, RecipientTypeDetails

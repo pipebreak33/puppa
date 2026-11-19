@@ -12,14 +12,14 @@ param:       Automapping | Visa automatiskt i Outlook? | Ja | Ja,Nej
 foreach ($a in @($Anvandare -split '[,;\s]+' | Where-Object { $_ })) {
     if ($Atkomst -like '*fullbehörighet*' -or $Atkomst -like 'Fullbehörighet*') {
         Add-MailboxPermission -Identity $Postlada -User $a -AccessRights FullAccess -InheritanceType All -AutoMapping ($Automapping -eq 'Ja') -Confirm:$false -ErrorAction Stop | Out-Null
-        Write-Host "  + $a fullbehörighet"
+        Write-Host (T "  + $a full access" "  + $a fullbehörighet")
     }
     if ($Atkomst -like '*Skicka som*') {
         Add-RecipientPermission -Identity $Postlada -Trustee $a -AccessRights SendAs -Confirm:$false -ErrorAction Stop | Out-Null
-        Write-Host "  + $a skicka som"
+        Write-Host (T "  + $a send as" "  + $a skicka som")
     }
     if ($Atkomst -like 'Skicka för*') {
         Set-Mailbox -Identity $Postlada -GrantSendOnBehalfTo @{ Add = $a } -ErrorAction Stop
-        Write-Host "  + $a skicka för"
+        Write-Host (T "  + $a send on behalf" "  + $a skicka för")
     }
 }

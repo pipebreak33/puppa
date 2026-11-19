@@ -9,7 +9,7 @@ $sp = '00000003-0000-0ff1-ce00-000000000000'
 $pnp = Get-MgApplication -All -Property 'id,appId,displayName,createdDateTime,requiredResourceAccess,publicClient,keyCredentials' |
     Where-Object { $_.DisplayName -match 'PnP' -or (($_.RequiredResourceAccess.ResourceAppId -contains $sp) -and
                    (@($_.PublicClient.RedirectUris) -match 'localhost')) } | Sort-Object CreatedDateTime -Descending
-if (-not $pnp) { Write-Host 'Hittade ingen PnP-app. Välj "Ny PnP-appregistrering" i Puppa för att skapa en.'; return }
+if (-not $pnp) { Write-Host (T 'No PnP app found. Choose "New PnP app registration" in Puppa to create one.' 'Hittade ingen PnP-app. Välj "Ny PnP-appregistrering" i Puppa för att skapa en.'); return }
 $pnp | ForEach-Object {
     [pscustomobject]@{
         Namn = $_.DisplayName; ClientId = $_.AppId; Skapad = $_.CreatedDateTime

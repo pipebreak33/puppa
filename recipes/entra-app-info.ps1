@@ -7,7 +7,7 @@ beskrivning: ClientId, ägare, redirect-URI:er, API-rättigheter (med namn), hem
 param:       App | Appens namn eller ClientId | | @app
 #>
 $a = Get-MgApplication -Filter "appId eq '$App'" -ErrorAction Stop | Select-Object -First 1
-if (-not $a) { throw "Hittade ingen app med ClientId $App" }
+if (-not $a) { throw (T "No app with ClientId $App" "Hittade ingen app med ClientId $App") }
 $sp = Get-MgServicePrincipal -Filter "appId eq '$App'" -ErrorAction SilentlyContinue | Select-Object -First 1
 $agare = (Get-MgApplicationOwner -ApplicationId $a.Id -All | ForEach-Object { $_.AdditionalProperties.userPrincipalName ?? $_.AdditionalProperties.displayName }) -join ', '
 $rattigheter = foreach ($r in $a.RequiredResourceAccess) {

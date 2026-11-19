@@ -12,7 +12,7 @@ param:       Dagar | Raderat senaste X dagar | 7
 $fran = (Get-Date).AddDays(-[int]$Dagar)
 $poster = Get-PnPRecycleBinItem -RowLimit 20000 | Where-Object {
     $_.DeletedDate -ge $fran -and ($Filter -eq '*' -or $_.LeafName -like "*$Filter*") -and (-not $RaderadAv -or $_.DeletedByEmail -eq $RaderadAv) }
-Write-Host "Återställer $(@($poster).Count) objekt"
+Write-Host (T "Restoring $(@($poster).Count) items" "Återställer $(@($poster).Count) objekt")
 foreach ($p in $poster) {
     Restore-PnPRecycleBinItem -Identity $p -Force -ErrorAction Continue
     [pscustomobject]@{ Fil = $p.LeafName; Mapp = $p.DirName }

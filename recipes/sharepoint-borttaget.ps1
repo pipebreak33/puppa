@@ -77,8 +77,8 @@ $borta = foreach ($r in $rader) {
 $borta = @($borta | Sort-Object Tid -Descending)
 
 if (-not $borta) {
-    Write-Host "Inget borttaget hittades$(if ($sajtUrl) { " på $sajtUrl" })$(if ($Vem) { " av $Vem" }) de senaste $antal dagarna."
-    Write-Host 'Förslag: öka antalet dagar eller töm namnfiltret. Kolla också papperskorgen (receptet "Papperskorgen").'
+    Write-Host (T "Nothing deleted found$(if ($sajtUrl) { " on $sajtUrl" })$(if ($Vem) { " by $Vem" }) in the last $antal days." "Inget borttaget hittades$(if ($sajtUrl) { " på $sajtUrl" })$(if ($Vem) { " av $Vem" }) de senaste $antal dagarna.")
+    Write-Host (T 'Tip: increase the number of days or clear the name filter. Also check the recycle bin (the "Recycle bin" recipe).' 'Förslag: öka antalet dagar eller töm namnfiltret. Kolla också papperskorgen (receptet "Papperskorgen").')
     return
 }
 
@@ -97,8 +97,8 @@ $perDag = $borta | Group-Object { $_.Tid.ToString('yyyy-MM-dd') } | Sort-Object 
                        Personer = (($_.Group.'Borttaget av' | Group-Object | Sort-Object Count -Descending | ForEach-Object { "$($_.Name) ($($_.Count))" }) -join ', ') }
 }
 
-Write-Host "$($borta.Count) borttagningar av $(@($perPerson).Count) personer de senaste $antal dagarna$(if ($sajtUrl) { " på $sajtUrl" }):"
-foreach ($p in $perPerson | Select-Object -First 5) { Write-Host ("  {0,4} st  {1}" -f $p.Totalt, $p.'Borttaget av') }
+Write-Host (T "$($borta.Count) deletions by $(@($perPerson).Count) people in the last $antal days$(if ($sajtUrl) { " on $sajtUrl" }):" "$($borta.Count) borttagningar av $(@($perPerson).Count) personer de senaste $antal dagarna$(if ($sajtUrl) { " på $sajtUrl" }):")
+foreach ($p in $perPerson | Select-Object -First 5) { Write-Host ("  {0,4}  {1}" -f $p.Totalt, $p.'Borttaget av') }
 
 if ($Excel -eq 'Ja') {
     # ImportExcel varnar om autosize på macOS/Linux. Modulfunktioner ser bara den globala inställningen.
@@ -146,7 +146,7 @@ if ($Excel -eq 'Ja') {
     $pkg.Workbook.Worksheets['Sammanfattning'].Select()
     Close-ExcelPackage $pkg
     } finally { $global:WarningPreference = $tidigare }
-    Write-Host "Excel-rapport: $path"
+    Write-Host (T "Excel report: $path" "Excel-rapport: $path")
     Invoke-Item -LiteralPath $path
 }
 

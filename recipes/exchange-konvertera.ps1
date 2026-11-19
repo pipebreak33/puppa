@@ -8,4 +8,4 @@ param:       Postlada | Postlådan (adress) | | @mailbox
 #>
 Set-Mailbox -Identity $Postlada -Type Shared -ErrorAction Stop
 Get-EXOMailbox -Identity $Postlada | Select-Object DisplayName, PrimarySmtpAddress, RecipientTypeDetails
-Write-Host 'Kom ihåg: ta bort licensen när konverteringen syns (postlådor under 50 GB behöver ingen).'
+Write-Host (T 'Remember: remove the licence once the conversion shows up (mailboxes under 50 GB need none).' 'Kom ihåg: ta bort licensen när konverteringen syns (postlådor under 50 GB behöver ingen).')

@@ -7,7 +7,7 @@ beskrivning: Ägare, medlemmar och gäster i ett team.
 param:       Team | Teamets namn | | @team
 #>
 $t = @(Get-Team -DisplayName $Team)
-if ($t.Count -ne 1) { throw "Hittade $($t.Count) team som heter '$Team'." }
+if ($t.Count -ne 1) { throw (T "Found $($t.Count) teams called '$Team'." "Hittade $($t.Count) team som heter '$Team'.") }
 $t = $t[0]
 
 Get-TeamUser -GroupId $t.GroupId | Sort-Object Role, Name | Select-Object Name, User, Role

@@ -59,14 +59,14 @@ $flytt = foreach ($r in $rader) {
 $flytt = @($flytt | Sort-Object Tid -Descending)
 
 if (-not $flytt) {
-    Write-Host "Inga flyttar hittades$(if ($sajtUrl) { " på $sajtUrl" })$(if ($Vem) { " gjorda av $Vem" }) de senaste $antal dagarna."
-    Write-Host 'Förslag: öka antalet dagar, töm namnfiltret, eller kolla papperskorgen (receptet "Papperskorgen").'
+    Write-Host (T "No moves found$(if ($sajtUrl) { " on $sajtUrl" })$(if ($Vem) { " made by $Vem" }) in the last $antal days." "Inga flyttar hittades$(if ($sajtUrl) { " på $sajtUrl" })$(if ($Vem) { " gjorda av $Vem" }) de senaste $antal dagarna.")
+    Write-Host (T 'Tip: increase the number of days, clear the name filter, or check the recycle bin (the "Recycle bin" recipe).' 'Förslag: öka antalet dagar, töm namnfiltret, eller kolla papperskorgen (receptet "Papperskorgen").')
     return
 }
 
 if (-not $sajtUrl -and -not $sajtNamn) {
     # Ingen sajt angiven: föreslå var det har flyttats mest
-    Write-Host "Här har det flyttats mest de senaste $antal dagarna – kör igen med en av länkarna:"
+    Write-Host (T "This is where the most was moved in the last $antal days. Run again with one of the links:" "Här har det flyttats mest de senaste $antal dagarna – kör igen med en av länkarna:")
     $flytt | Group-Object Sajt | Sort-Object Count -Descending | Select-Object -First 25 | ForEach-Object {
         [pscustomobject]@{ Sajt = $_.Name; Flyttar = $_.Count; Senast = ($_.Group | Select-Object -First 1).Tid
                            'Flyttad av' = (($_.Group.'Flyttad av' | Group-Object | Sort-Object Count -Descending | Select-Object -First 3).Name) -join ', ' }
@@ -78,10 +78,10 @@ $flytt | Select-Object Tid, 'Flyttad av', Typ, Namn, Från, Till
 
 # Förslag på ställen att leta: mapparna som saker har flyttats till, flest först
 Write-Host ''
-Write-Host 'Förslag på ställen att leta (dit saker har flyttats, flest först):'
+Write-Host (T 'Places to look (where things were moved, most first):' 'Förslag på ställen att leta (dit saker har flyttats, flest först):')
 $flytt | Group-Object TillMapp | Sort-Object Count -Descending | Select-Object -First 8 | ForEach-Object {
-    Write-Host ("  {0,4} st  {1}" -f $_.Count, $_.Name)
+    Write-Host ("  {0,4}  {1}" -f $_.Count, $_.Name)
 }
 $andra = @($flytt | Where-Object { -not $_.Till.StartsWith($sajtUrl, [StringComparison]::OrdinalIgnoreCase) })
-if ($andra) { Write-Host "  $($andra.Count) flyttades till en annan sajt – se kolumnen Till." }
-Write-Host '  Saknas något ändå? Kolla papperskorgen (receptet "Papperskorgen") och versionshistoriken i mappen.'
+if ($andra) { Write-Host (T "  $($andra.Count) were moved to another site, see the To column." "  $($andra.Count) flyttades till en annan sajt – se kolumnen Till.") }
+Write-Host (T '  Still missing something? Check the recycle bin (the "Recycle bin" recipe) and the version history in the folder.' '  Saknas något ändå? Kolla papperskorgen (receptet "Papperskorgen") och versionshistoriken i mappen.')

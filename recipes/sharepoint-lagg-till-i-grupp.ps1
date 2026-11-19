@@ -10,6 +10,6 @@ param:       Anvandare | Användare (UPN, flera med komma) | | @spuser+
 #>
 foreach ($a in @($Anvandare -split '[,;\s]+' | Where-Object { $_ })) {
     Add-PnPGroupMember -Group $Grupp -LoginName $a -ErrorAction Stop
-    Write-Host "Lade till $a i $Grupp"
+    Write-Host (T "Added $a to $Grupp" "Lade till $a i $Grupp")
 }
 Get-PnPGroupMember -Group $Grupp | Select-Object Title, Email
